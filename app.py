@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import os
+import re
 import time
 import subprocess
+from datetime import datetime, timedelta, timezone
 import requests
 from seleniumbase import SB
 
@@ -14,6 +16,12 @@ TG_CHAT_ID   = os.environ.get("TG_CHAT_ID") or ""        # tg通知 chat id(可�
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""      # tg通知bot token(可选)
 
 BASE_URL = "https://dashboard.katabump.com"  # 网站链接
+
+_MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
+    "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
+}
 
 #  Telegram 推送模块
 def send_tg_message(status_icon, status_text, time_left=""):
@@ -345,6 +353,35 @@ def _read_alert(sb):
         return ""
 
 
+def _next_renewal_date_from_alert(alert_text):
+    """从页面的 “as of 27 August” 提示中提取下次可续期日期。"""
+    text = alert_text or ""
+    iso_match = re.search(r"\bas of\s+(20\d{2}-\d{2}-\d{2})\b", text, re.I)
+    if iso_match:
+        return iso_match.group(1)
+
+    date_match = re.search(
+        r"\bas of\s+(\d{1,2})\s+([A-Za-z]+)(?:\s+(20\d{2}))?\b", text, re.I
+    )
+    if not date_match:
+        return None
+
+    day = int(date_match.group(1))
+    month = _MONTHS.get(date_match.group(2).lower())
+    if not month:
+        return None
+
+    now_bj = datetime.now(timezone.utc) + timedelta(hours=8)
+    year = int(date_match.group(3) or now_bj.year)
+    try:
+        candidate = datetime(year, month, day)
+    except ValueError:
+        return None
+    if not date_match.group(3) and candidate.date() < (now_bj - timedelta(days=1)).date():
+        candidate = candidate.replace(year=year + 1)
+    return candidate.strftime("%Y-%m-%d")
+
+
 def _goto_server_detail(sb) -> bool:
     """在 Dashboard 首页查找并点击 See 进入服务器详情页"""
     print("\n🖥️  正在进入服务器续期页...")
@@ -354,6 +391,11 @@ def _goto_server_detail(sb) -> bool:
     alert_text = _read_alert(sb)
     if alert_text and "can't renew" in alert_text.lower():
         print(f"ℹ️  页面顶部提示: {alert_text}")
+        next_renewal_date = _next_renewal_date_from_alert(alert_text)
+        if next_renewal_date:
+            print(f"下次续期时间(标准): {next_renewal_date}")
+        else:
+            print("⚠️ 未能从页面提示提取下次续期日期")
         send_tg_message("ℹ️", "⚠️ 未到续期时间", alert_text)
         return False
 

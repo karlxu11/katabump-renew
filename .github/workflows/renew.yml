@@ -1,8 +1,8 @@
 name: Katabump Auto Renew
 
 on:
-  schedule:
-  - cron: '10 0 */2 * *'  # 每2天 UTC 0点 (北京时间 8点) 运行,根据服务到期时间自行修改
+  repository_dispatch:
+    types: [cf_timer]
   workflow_dispatch: # 允许手动触发
 
 jobs:
@@ -40,8 +40,66 @@ jobs:
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       run: |
+        set -o pipefail
         xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
-          python3 app.py
+          python3 app.py 2>&1 | tee renew.log
+
+    - name: 📅 提取页面中的下次续期日期
+      id: extract_renewal_date
+      if: success()
+      run: |
+        RENEWAL_DATE=$(grep -oP '下次续期时间\(标准\): \K\d{4}-\d{2}-\d{2}' renew.log | tail -1 || true)
+        if [ -z "$RENEWAL_DATE" ]; then
+          echo "skip_update=true" >> "$GITHUB_OUTPUT"
+          echo "::warning::未能提取页面中的下次续期日期，跳过 Cloudflare Worker Cron 更新"
+          exit 0
+        fi
+        echo "renewal_date=$RENEWAL_DATE" >> "$GITHUB_OUTPUT"
+        echo "skip_update=false" >> "$GITHUB_OUTPUT"
+        echo "::notice::页面下次续期日期: $RENEWAL_DATE"
+
+    - name: ⏰ 计算 Cloudflare Worker Cron（提前一天）
+      id: update_cron
+      if: success() && steps.extract_renewal_date.outputs.skip_update != 'true'
+      run: |
+        set -euo pipefail
+        RENEWAL_DATE="${{ steps.extract_renewal_date.outputs.renewal_date }}"
+        RENEWAL_EPOCH=$(date -u -d "$RENEWAL_DATE 00:12:00" +%s)
+        TARGET_EPOCH=$((RENEWAL_EPOCH - 86400))
+        NEXT_UTC=$(date -u -d "@$TARGET_EPOCH" +"%Y-%m-%d %H:%M UTC")
+        NEW_CRON="$(date -u -d "@$TARGET_EPOCH" +"%-M %-H %-d %-m *")"
+        echo "new_cron=$NEW_CRON" >> "$GITHUB_OUTPUT"
+        echo "next_utc=$NEXT_UTC" >> "$GITHUB_OUTPUT"
+        echo "::notice::下次 Worker 运行: $NEXT_UTC（北京时间 08:12）"
+
+    - name: ☁️ 更新 Cloudflare Worker Cron
+      if: success() && steps.extract_renewal_date.outputs.skip_update != 'true'
+      env:
+        CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        CF_WORKER_NAME: ${{ secrets.CF_WORKER_NAME }}
+        CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        NEW_CRON: ${{ steps.update_cron.outputs.new_cron }}
+      run: |
+        set -euo pipefail
+        if [ -z "${CF_ACCOUNT_ID:-}" ] || [ -z "${CF_WORKER_NAME:-}" ] || [ -z "${CF_API_TOKEN:-}" ]; then
+          echo "::warning::未配置 CF_ACCOUNT_ID / CF_WORKER_NAME / CF_API_TOKEN，跳过 Cloudflare Worker Cron 更新"
+          exit 0
+        fi
+        PAYLOAD=$(python3 -c 'import json, os; print(json.dumps([{"cron": os.environ["NEW_CRON"]}]))')
+        BODY_FILE=$(mktemp)
+        HTTP_STATUS=$(curl -sS -o "$BODY_FILE" -w "%{http_code}" -X PUT \
+          "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/scripts/${CF_WORKER_NAME}/schedules" \
+          -H "Authorization: Bearer ${CF_API_TOKEN}" \
+          -H "Content-Type: application/json" \
+          --data "$PAYLOAD")
+        cat "$BODY_FILE"
+        python3 - "$BODY_FILE" "$HTTP_STATUS" <<'PY'
+        import json, pathlib, sys
+        body = json.loads(pathlib.Path(sys.argv[1]).read_text() or "{}")
+        if not (200 <= int(sys.argv[2]) < 300 and body.get("success") is True):
+            raise SystemExit(f"Cloudflare Worker Cron 更新失败: {body.get('errors', [])}")
+        PY
+        echo "::notice::Cloudflare Worker Cron 已更新: ${NEW_CRON}"
         
     - name: 🧹 清理旧的工作流运行记录
       if: always()
