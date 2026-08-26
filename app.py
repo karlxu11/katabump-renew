@@ -62,6 +62,9 @@ def send_tg_message(status_icon, status_text, time_left=""):
             print("📩 Telegram 通知发送成功！")
         else:
             print(f"⚠️ Telegram 通知发送失败: {r.text}")
+    except requests.exceptions.ReadTimeout:
+        # Telegram 可能已经接收并处理请求，但响应在本地超时；重试会造成重复通知。
+        print("⚠️ Telegram 响应超时：消息可能已送达，未自动重试以避免重复通知。")
     except Exception as e:
         print(f"⚠️ Telegram 通知发送异常: {e}")
 
@@ -618,6 +621,12 @@ def _check_renew_result(sb):
         print(f"📩 页面提示: {alert_text}")
         low = alert_text.lower()
         if "can't renew" in low or "unable" in low:
+            next_renewal_date = _next_renewal_date_from_alert(alert_text)
+            if next_renewal_date:
+                # 无论提示出现在首页还是提交 Renew 后，均供工作流更新 Worker Cron。
+                print(f"下次续期时间(标准): {next_renewal_date}")
+            else:
+                print("⚠️ 未能从页面提示提取下次续期日期")
             send_tg_message("⏳", "未到续期时间", alert_text)
         elif any(kw in low for kw in ( "renewed", "success", "extended")):
             send_tg_message("✅", "续期成功", alert_text)
