@@ -16,7 +16,7 @@ export default {
 };
 
 async function triggerGithubAction(env, source) {
-  const { GH_PAT, GH_USER, GH_REPO } = env;
+  const { GH_PAT, GH_USER, GH_REPO, TG_BOT_TOKEN, TG_CHAT_ID } = env;
   if (!GH_PAT || !GH_USER || !GH_REPO) {
     return "Worker 配置缺失: 请设置 GH_PAT / GH_USER / GH_REPO";
   }
@@ -32,9 +32,41 @@ async function triggerGithubAction(env, source) {
       },
       body: JSON.stringify({ event_type: env.GH_EVENT_TYPE || "cf_timer" }),
     });
-    if (response.ok) return `GitHub Actions 已触发（${source}）`;
-    return `GitHub 触发失败 (${response.status}): ${(await response.text()).slice(0, 300)}`;
+    const message = response.ok
+      ? `✅ GitHub Actions 已触发\n仓库: ${GH_USER}/${GH_REPO}\n来源: ${source}`
+      : `❌ GitHub 触发失败 (${response.status}): ${(await response.text()).slice(0, 300)}`;
+    await sendTelegramMessage(TG_BOT_TOKEN, TG_CHAT_ID, message);
+    return message;
   } catch (error) {
-    return `Worker 内部错误: ${error.message}`;
+    const message = `❌ Worker 内部错误: ${error.message}`;
+    await sendTelegramMessage(TG_BOT_TOKEN, TG_CHAT_ID, message);
+    return message;
+  }
+}
+
+function normalizeTelegramToken(rawToken) {
+  let token = String(rawToken || "").trim();
+  if (token.startsWith("https://api.telegram.org/bot") || token.startsWith("http://api.telegram.org/bot")) {
+    token = token.replace(/^https?:\/\/api\.telegram\.org\/bot/, "").split("/", 1)[0];
+  } else if (token.startsWith("bot")) {
+    token = token.slice(3);
+  }
+  return token.trim();
+}
+
+async function sendTelegramMessage(rawToken, chatId, text) {
+  const token = normalizeTelegramToken(rawToken);
+  const targetChatId = String(chatId || "").trim();
+  if (!token || !targetChatId) return;
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: targetChatId, text }),
+    });
+    if (!response.ok) console.log(`Telegram notification failed (${response.status}): ${await response.text()}`);
+  } catch (error) {
+    console.log(`Telegram notification error: ${error.message}`);
   }
 }
