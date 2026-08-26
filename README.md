@@ -35,4 +35,4 @@
 ### 注意事项
 - 尽量添加一个干净的节点，以免过不了cf盾
 - Cloudflare Worker 请部署仓库根目录的 `workers.js`，并设置 Worker Secrets：`GH_PAT`、`GH_USER`、`GH_REPO`、`AUTH_KEY`、`TG_BOT_TOKEN`、`TG_CHAT_ID`。Worker 与 GitHub Actions 的 Telegram Secret 相互独立，均需配置。
-- Worker 通过 `repository_dispatch` 触发本工作流。首次部署后请手动运行一次工作流：它会从页面的 “as of 日期” 中读出下次可续期日期，并把 Worker Cron 改为前一天 08:12（北京时间）。
+- Worker 通过 `repository_dispatch` 触发本工作流。首次部署后请手动运行一次工作流：它会读取服务器详情页的 `Expiry` 日期，并把 Worker Cron 改为该日期前一天 08:12（北京时间）。

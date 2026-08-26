@@ -44,19 +44,19 @@ jobs:
         xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
           python3 app.py 2>&1 | tee renew.log
 
-    - name: 📅 提取页面中的下次续期日期
+    - name: 📅 提取服务器 Expiry 日期
       id: extract_renewal_date
       if: success()
       run: |
         RENEWAL_DATE=$(grep -oP '下次续期时间\(标准\): \K\d{4}-\d{2}-\d{2}' renew.log | tail -1 || true)
         if [ -z "$RENEWAL_DATE" ]; then
           echo "skip_update=true" >> "$GITHUB_OUTPUT"
-          echo "::warning::未能提取页面中的下次续期日期，跳过 Cloudflare Worker Cron 更新"
+          echo "::warning::未能提取服务器 Expiry 日期，跳过 Cloudflare Worker Cron 更新"
           exit 0
         fi
         echo "renewal_date=$RENEWAL_DATE" >> "$GITHUB_OUTPUT"
         echo "skip_update=false" >> "$GITHUB_OUTPUT"
-        echo "::notice::页面下次续期日期: $RENEWAL_DATE"
+        echo "::notice::服务器 Expiry 日期: $RENEWAL_DATE"
 
     - name: ⏰ 计算 Cloudflare Worker Cron（提前一天）
       id: update_cron

@@ -117,6 +117,38 @@ _WININFO_JS = """
 })()
 """
 
+_SERVER_EXPIRY_JS = """
+(function(){
+    function normalize(value) {
+        return String(value || '').replace(/\\s+/g, ' ').trim();
+    }
+    function isoDate(value) {
+        var match = normalize(value).match(/\\b(20\\d{2}-\\d{2}-\\d{2})\\b/);
+        return match ? match[1] : null;
+    }
+
+    var elements = Array.from(document.querySelectorAll('tr, li, div, p, span, dt, dd, td, th'));
+    for (var i = 0; i < elements.length; i++) {
+        var element = elements[i];
+        if (normalize(element.textContent).toLowerCase() !== 'expiry') continue;
+        var sibling = isoDate(element.nextElementSibling ? element.nextElementSibling.textContent : '');
+        if (sibling) return sibling;
+
+        var parent = element.parentElement;
+        if (!parent) continue;
+        var children = Array.from(parent.children);
+        var index = children.indexOf(element);
+        for (var j = index + 1; j < children.length; j++) {
+            var childDate = isoDate(children[j].textContent);
+            if (childDate) return childDate;
+        }
+    }
+
+    var fallback = (document.body ? document.body.innerText : '').match(/\\bExpiry\\b[\\s\\S]{0,80}\\b(20\\d{2}-\\d{2}-\\d{2})\\b/i);
+    return fallback ? fallback[1] : null;
+})()
+"""
+
 # ===== 自动续期相关 =====
 
 # 在模态框内查找 iframe 并展开，返回点击坐标
@@ -385,6 +417,20 @@ def _next_renewal_date_from_alert(alert_text):
     return candidate.strftime("%Y-%m-%d")
 
 
+def _get_server_expiry_date(sb):
+    """读取详情页的 Expiry；该日期才是动态 Cron 的调度依据。"""
+    try:
+        expiry_date = sb.execute_script(_SERVER_EXPIRY_JS)
+    except Exception as e:
+        print(f"⚠️ 读取页面 Expiry 失败: {e}")
+        return None
+    if expiry_date:
+        print(f"下次续期时间(标准): {expiry_date}")
+        return expiry_date
+    print("⚠️ 未能从服务器详情页读取 Expiry 日期")
+    return None
+
+
 def _goto_server_detail(sb) -> bool:
     """在 Dashboard 首页查找并点击 See 进入服务器详情页"""
     print("\n🖥️  正在进入服务器续期页...")
@@ -396,7 +442,7 @@ def _goto_server_detail(sb) -> bool:
         print(f"ℹ️  页面顶部提示: {alert_text}")
         next_renewal_date = _next_renewal_date_from_alert(alert_text)
         if next_renewal_date:
-            print(f"下次续期时间(标准): {next_renewal_date}")
+            print(f"页面可续期日期(标准): {next_renewal_date}")
         else:
             print("⚠️ 未能从页面提示提取下次续期日期")
         send_tg_message("ℹ️", "⚠️ 未到续期时间", alert_text)
@@ -455,6 +501,7 @@ def _goto_server_detail(sb) -> bool:
     see_link.click()
     time.sleep(5)
     print(f"📄 当前页面: {sb.get_current_url()}")
+    _get_server_expiry_date(sb)
     return True
 
 
@@ -623,8 +670,7 @@ def _check_renew_result(sb):
         if "can't renew" in low or "unable" in low:
             next_renewal_date = _next_renewal_date_from_alert(alert_text)
             if next_renewal_date:
-                # 无论提示出现在首页还是提交 Renew 后，均供工作流更新 Worker Cron。
-                print(f"下次续期时间(标准): {next_renewal_date}")
+                print(f"页面可续期日期(标准): {next_renewal_date}")
             else:
                 print("⚠️ 未能从页面提示提取下次续期日期")
             send_tg_message("⏳", "未到续期时间", alert_text)
