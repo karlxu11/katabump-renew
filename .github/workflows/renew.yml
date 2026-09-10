@@ -1,8 +1,6 @@
 name: Katabump Auto Renew
 
 on:
-  schedule:
-    - cron: "2 0 * * *"
   repository_dispatch:
     types: [cf_timer]
   workflow_dispatch: # 允许手动触发
