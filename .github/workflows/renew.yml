@@ -1,6 +1,8 @@
 name: Katabump Auto Renew
 
 on:
+  schedule:
+    - cron: "2 0 * * *"
   repository_dispatch:
     types: [cf_timer]
   workflow_dispatch: # 允许手动触发
@@ -26,12 +28,34 @@ jobs:
         pip install seleniumbase requests
         seleniumbase install chromedriver
 
-    - name: ⚙ 设置代理 (sing-box)
-      continue-on-error: true
+    - name: 📥 准备 VPNGate SOCKS 服务
       env:
-        NODE_LINK: ${{ secrets.NODE_LINK }}
+        VPNGATE_TO_SOCKS_REF: 337dbaffbfdf69df65f0fc8bdcf6517e45ca18db
       run: |
-        bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+        set -euo pipefail
+        git clone --no-checkout --filter=blob:none https://github.com/shenyanshu/vpngate-to-socks.git vpngate-to-socks
+        git -C vpngate-to-socks fetch --depth 1 origin "$VPNGATE_TO_SOCKS_REF"
+        git -C vpngate-to-socks checkout --detach "$VPNGATE_TO_SOCKS_REF"
+        git -C vpngate-to-socks apply "$GITHUB_WORKSPACE/.github/vpngate-selection.patch"
+
+    - name: 🚇 启动 VPNGate SOCKS5 代理
+      env:
+        VPNGATE_COUNTRY: JP
+        VPNGATE_EXCLUDE_KEYWORD: public
+      run: |
+        set -euo pipefail
+        docker compose -p katabump-vpngate \
+          -f .github/vpngate-compose.yml \
+          up --build -d
+
+    - name: 🔎 等待 VPNGate 节点连接
+      env:
+        VPNGATE_WAIT_SECONDS: '300'
+      run: |
+        set -euo pipefail
+        python3 scripts/wait_for_vpngate.py
+        echo "IS_PROXY=true" >> "$GITHUB_ENV"
+        echo "PROXY_SERVER=socks5://127.0.0.1:10080" >> "$GITHUB_ENV"
 
     - name: 🚀 运行续期脚本
       env:
@@ -43,6 +67,18 @@ jobs:
         set -o pipefail
         xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
           python3 app.py 2>&1 | tee renew.log
+
+    - name: 🧾 输出 VPNGate 服务日志
+      if: always()
+      run: |
+        docker compose -p katabump-vpngate \
+          -f .github/vpngate-compose.yml logs --tail=160 || true
+
+    - name: 🛑 停止 VPNGate SOCKS5 代理
+      if: always()
+      run: |
+        docker compose -p katabump-vpngate \
+          -f .github/vpngate-compose.yml down --remove-orphans || true
 
     - name: 📅 提取服务器 Expiry 日期
       id: extract_renewal_date
