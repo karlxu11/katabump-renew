@@ -418,14 +418,14 @@ def _next_renewal_date_from_alert(alert_text):
 
 
 def _get_server_expiry_date(sb):
-    """读取详情页的 Expiry；该日期才是动态 Cron 的调度依据。"""
+    """读取续期成功后详情页的 Expiry，作为动态 Cron 的调度依据。"""
     try:
         expiry_date = sb.execute_script(_SERVER_EXPIRY_JS)
     except Exception as e:
         print(f"⚠️ 读取页面 Expiry 失败: {e}")
         return None
     if expiry_date:
-        print(f"下次续期时间(标准): {expiry_date}")
+        print(f"续期后下次续期时间(标准): {expiry_date}")
         return expiry_date
     print("⚠️ 未能从服务器详情页读取 Expiry 日期")
     return None
@@ -501,7 +501,6 @@ def _goto_server_detail(sb) -> bool:
     see_link.click()
     time.sleep(5)
     print(f"📄 当前页面: {sb.get_current_url()}")
-    _get_server_expiry_date(sb)
     return True
 
 
@@ -657,7 +656,7 @@ def _submit_renew(sb):
 
 
 def _check_renew_result(sb):
-    """读取页面 alert 提示，判断续期结果并推送 TG 通知"""
+    """读取页面 alert 提示，判断续期结果并推送 TG 通知。"""
     print("\n📋 检查续期结果...")
     alert_text = _read_alert(sb)
     if not alert_text:
@@ -674,13 +673,17 @@ def _check_renew_result(sb):
             else:
                 print("⚠️ 未能从页面提示提取下次续期日期")
             send_tg_message("⏳", "未到续期时间", alert_text)
+            return False
         elif any(kw in low for kw in ( "renewed", "success", "extended")):
             send_tg_message("✅", "续期成功", alert_text)
+            return True
         else:
             send_tg_message("ℹ️", "续期操作已执行", alert_text)
+            return False
     else:
         print("ℹ️ 未检测到明确的提示框，可能续期操作未生效")
         send_tg_message("ℹ️", "续期操作已执行", "未检测到明确提示")
+        return False
 
 
 def renew_server(sb):
@@ -700,7 +703,14 @@ def renew_server(sb):
     #     print("⚠️ ALTCHA 验证未通过，仍尝试提交 Renew...")
 
     _submit_renew(sb)
-    _check_renew_result(sb)
+    if not _check_renew_result(sb):
+        return
+
+    # 续期成功后页面上的 Expiry 才会更新；刷新后再读取，供工作流更新 Cron。
+    print("\n🔄 重新读取续期后的服务器 Expiry...")
+    sb.refresh()
+    time.sleep(5)
+    _get_server_expiry_date(sb)
 
 
 #  脚本执行入口 (可选代理)
