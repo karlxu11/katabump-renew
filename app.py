@@ -155,37 +155,27 @@ _SERVER_EXPIRY_JS = """
 _ALTCHA_EXPAND_JS = """
 (function() {
     var modal = document.querySelector('div.modal.show') || document;
-    function find(root) {
-        var iframes = root.querySelectorAll ? root.querySelectorAll('iframe') : [];
-        for (var i = 0; i < iframes.length; i++) {
-            var r = iframes[i].getBoundingClientRect();
-            if (r.width > 0 && r.height > 0) {
-                iframes[i].style.width  = '300px';
-                iframes[i].style.height = '150px';
-                iframes[i].style.minWidth  = '300px';
-                iframes[i].style.minHeight = '150px';
-                iframes[i].style.visibility = 'visible';
-                iframes[i].style.opacity = '1';
-                var el = iframes[i];
-                for (var j = 0; j < 10; j++) {
-                    el = el.parentElement;
-                    if (!el) break;
-                    el.style.overflow = 'visible';
-                }
-                var r2 = iframes[i].getBoundingClientRect();
-                return { cx: Math.round(r2.x + 30), cy: Math.round(r2.y + r2.height / 2) };
+    var iframes = modal.querySelectorAll('iframe');
+    for (var i = 0; i < iframes.length; i++) {
+        var r = iframes[i].getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+            iframes[i].style.width  = '300px';
+            iframes[i].style.height = '150px';
+            iframes[i].style.minWidth  = '300px';
+            iframes[i].style.minHeight = '150px';
+            iframes[i].style.visibility = 'visible';
+            iframes[i].style.opacity = '1';
+            var el = iframes[i];
+            for (var j = 0; j < 10; j++) {
+                el = el.parentElement;
+                if (!el) break;
+                el.style.overflow = 'visible';
             }
+            var r2 = iframes[i].getBoundingClientRect();
+            return { cx: Math.round(r2.x + 30), cy: Math.round(r2.y + r2.height / 2) };
         }
-        var nodes = root.querySelectorAll ? root.querySelectorAll('*') : [];
-        for (var k = 0; k < nodes.length; k++) {
-            if (nodes[k].shadowRoot) {
-                var nested = find(nodes[k].shadowRoot);
-                if (nested) return nested;
-            }
-        }
-        return null;
     }
-    return find(modal);
+    return null;
 })()
 """
 
@@ -193,81 +183,22 @@ _ALTCHA_EXPAND_JS = """
 _ALTCHA_SOLVED_JS = """
 (function(){
     var modal = document.querySelector('div.modal.show') || document;
-    function walk(root) {
-        var nodes = [];
-        if (root.matches) nodes.push(root);
-        if (root.querySelectorAll) nodes = nodes.concat(Array.from(root.querySelectorAll('*')));
-        for (var i = 0; i < nodes.length; i++) {
-            var el = nodes[i];
-            var name = (el.name || '').toLowerCase();
-            var tag = (el.tagName || '').toLowerCase();
-            var state = (el.getAttribute && (
-                el.getAttribute('data-state') || el.getAttribute('state') ||
-                el.getAttribute('status') || el.getAttribute('aria-checked')
-            ) || '').toLowerCase();
-            if ((el.type === 'hidden' && (name.includes('altcha') || name.includes('captcha')) &&
-                 el.value && el.value.length > 20) ||
-                (el.type === 'checkbox' && (el.disabled || el.checked)) ||
-                state === 'verified' || state === 'true' ||
-                el.classList && (el.classList.contains('altcha--verified') ||
-                                  el.classList.contains('altcha-verified'))) return true;
-            if (el.shadowRoot && walk(el.shadowRoot)) return true;
-        }
-        return false;
+    // hidden input 有值
+    var inputs = modal.querySelectorAll('input[type="hidden"]');
+    for (var i = 0; i < inputs.length; i++) {
+        var n = (inputs[i].name || '').toLowerCase();
+        if ((n.includes('altcha') || n.includes('captcha')) &&
+            inputs[i].value && inputs[i].value.length > 20) return true;
     }
-    // token 可能由 widget 写入 modal 外的 form hidden input。
-    return walk(document) || walk(modal);
-})()
-"""
-
-_ALTCHA_PRESENT_JS = """
-(function(){
-    var modal = document.querySelector('div.modal.show') || document;
-    function walk(root) {
-        var nodes = [];
-        if (root.matches) nodes.push(root);
-        if (root.querySelectorAll) nodes = nodes.concat(Array.from(root.querySelectorAll('*')));
-        for (var i = 0; i < nodes.length; i++) {
-            var el = nodes[i];
-            var name = (el.name || '').toLowerCase();
-            var src = (el.src || '').toLowerCase();
-            var tag = (el.tagName || '').toLowerCase();
-            if ((el.classList && el.classList.contains('altcha')) ||
-                tag === 'altcha-widget' || name.includes('altcha') ||
-                src.includes('altcha')) return true;
-            if (el.shadowRoot && walk(el.shadowRoot)) return true;
-        }
-        return false;
+    // checkbox 变为 disabled
+    var cbs = modal.querySelectorAll('input[type="checkbox"]');
+    for (var j = 0; j < cbs.length; j++) {
+        if (cbs[j].disabled) return true;
     }
-    return walk(modal);
-})()
-"""
-
-_ALTCHA_CLICK_JS = """
-(function(){
-    var modal = document.querySelector('div.modal.show') || document;
-    function walk(root, insideAltcha) {
-        var nodes = root.children ? Array.from(root.children) :
-            (root.querySelectorAll ? Array.from(root.querySelectorAll(':scope > *')) : []);
-        for (var i = 0; i < nodes.length; i++) {
-            var el = nodes[i];
-            var name = (el.name || '').toLowerCase();
-            var tag = (el.tagName || '').toLowerCase();
-            var isAltcha = insideAltcha ||
-                (el.classList && el.classList.contains('altcha')) ||
-                tag === 'altcha-widget' || name.includes('altcha');
-            if (isAltcha && el.type === 'checkbox' && !el.disabled && !el.checked) {
-                el.click();
-                el.dispatchEvent(new Event('input', {bubbles: true}));
-                el.dispatchEvent(new Event('change', {bubbles: true}));
-                return true;
-            }
-            if (el.shadowRoot && walk(el.shadowRoot, isAltcha)) return true;
-            if (walk(el, isAltcha)) return true;
-        }
-        return false;
-    }
-    return walk(modal, false);
+    // widget data-state 属性
+    var w = modal.querySelector('[data-state="verified"],.altcha--verified,.altcha-verified');
+    if (w) return true;
+    return false;
 })()
 """
 
@@ -305,25 +236,14 @@ def _activate_window():
     except Exception:
         pass
 
-def _xdotool_click(x: int, y: int):
-    """Click a cross-origin ALTCHA iframe using the visible browser window."""
-    _activate_window()
-    try:
-        subprocess.run(
-            ["xdotool", "mousemove", "--sync", str(x), str(y)],
-            timeout=3,
-            check=True,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(0.15)
-        subprocess.run(
-            ["xdotool", "click", "1"],
-            timeout=2,
-            check=True,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception as exc:
-        print(f"⚠️ ALTCHA 物理点击失败: {exc}")
+# def _xdotool_click(x: int, y: int):
+#     _activate_window()
+#     try:
+#         subprocess.run(["xdotool", "mousemove", "--sync", str(x), str(y)], timeout=3, stderr=subprocess.DEVNULL)
+#         time.sleep(0.15)
+#         subprocess.run(["xdotool", "click", "1"], timeout=2, stderr=subprocess.DEVNULL)
+#     except Exception:
+#         os.system(f"xdotool mousemove {x} {y} click 1 2>/dev/null")
 
 #  人机验证处理（使用 SeleniumBase 内置 uc_gui_click_captcha）
 def handle_turnstile(sb) -> bool:
@@ -459,71 +379,13 @@ def login(sb) -> bool:
 
 # ===== 自动续期流程 =====
 
-def _read_alerts(sb):
-    """读取当前页面可见的提示框。
-
-    续期模态框里会长期显示一个 server type 的 Warning；只读第一个
-    ``div.alert`` 会把它误当成续期结果，因此这里保留所有提示及其 class，
-    由调用方按语义筛选。
-    """
-    try:
-        alerts = sb.execute_script(
-            """
-            return Array.from(document.querySelectorAll(
-                'div.alert,[role="alert"],.toast,.toast-body,.swal2-popup,.notification,.flash-message'
-            ))
-                .map(function (el) {
-                    var style = window.getComputedStyle(el);
-                    var rect = el.getBoundingClientRect();
-                    return {
-                        text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim(),
-                        className: el.className || '',
-                        visible: style.display !== 'none' && style.visibility !== 'hidden' &&
-                            rect.width > 0 && rect.height > 0
-                    };
-                })
-                .filter(function (item) { return item.visible && item.text; });
-            """
-        ) or []
-        return [item for item in alerts if isinstance(item, dict) and item.get("text")]
-    except Exception:
-        return []
-
-
 def _read_alert(sb):
-    """读取第一个可见提示框的文本，找不到返回空串。"""
-    alerts = _read_alerts(sb)
-    return alerts[0]["text"] if alerts else ""
-
-
-def _find_alert(sb, predicate):
-    """返回第一个满足 predicate 的可见提示文本。"""
-    for alert in _read_alerts(sb):
-        text = alert["text"]
-        if predicate(text.lower()):
-            return text
-    return ""
-
-
-def _read_browser_alert(sb):
-    """读取并关闭原生 JavaScript alert（如果页面使用了它）。"""
+    """读取页面第一个 Bootstrap alert 的文本，找不到返回空串"""
     try:
-        if sb.is_alert_present():
-            text = (sb.get_alert_text() or "").strip()
-            sb.accept_alert()
-            return text
+        el = sb.find_element("div.alert", timeout=4)
+        return (el.text or "").strip()
     except Exception:
-        pass
-    return ""
-
-
-def _read_server_expiry_date(sb):
-    """读取当前详情页的 Expiry，不打印日志，供提交前后比较。"""
-    try:
-        value = sb.execute_script(_SERVER_EXPIRY_JS)
-    except Exception:
-        return None
-    return value.strip() if isinstance(value, str) and value.strip() else None
+        return ""
 
 
 def _next_renewal_date_from_alert(alert_text):
@@ -555,22 +417,35 @@ def _next_renewal_date_from_alert(alert_text):
     return candidate.strftime("%Y-%m-%d")
 
 
-def _goto_server_detail(sb, notify=True) -> bool:
+def _get_server_expiry_date(sb):
+    """读取详情页的 Expiry；该日期才是动态 Cron 的调度依据。"""
+    try:
+        expiry_date = sb.execute_script(_SERVER_EXPIRY_JS)
+    except Exception as e:
+        print(f"⚠️ 读取页面 Expiry 失败: {e}")
+        return None
+    if expiry_date:
+        print(f"下次续期时间(标准): {expiry_date}")
+        return expiry_date
+    print("⚠️ 未能从服务器详情页读取 Expiry 日期")
+    return None
+
+
+def _goto_server_detail(sb) -> bool:
     """在 Dashboard 首页查找并点击 See 进入服务器详情页"""
     print("\n🖥️  正在进入服务器续期页...")
     time.sleep(5)
 
     # 检查页面顶部是否已有"还无法续期"全局提示
-    alert_text = _find_alert(sb, lambda text: "can't renew" in text)
-    if alert_text:
+    alert_text = _read_alert(sb)
+    if alert_text and "can't renew" in alert_text.lower():
         print(f"ℹ️  页面顶部提示: {alert_text}")
         next_renewal_date = _next_renewal_date_from_alert(alert_text)
         if next_renewal_date:
             print(f"页面可续期日期(标准): {next_renewal_date}")
         else:
             print("⚠️ 未能从页面提示提取下次续期日期")
-        if notify:
-            send_tg_message("ℹ️", "⚠️ 未到续期时间", alert_text)
+        send_tg_message("ℹ️", "⚠️ 未到续期时间", alert_text)
         return False
 
     # 多种选择器尝试查找 See 链接
@@ -626,6 +501,7 @@ def _goto_server_detail(sb, notify=True) -> bool:
     see_link.click()
     time.sleep(5)
     print(f"📄 当前页面: {sb.get_current_url()}")
+    _get_server_expiry_date(sb)
     return True
 
 
@@ -761,213 +637,50 @@ def _open_renew_modal(sb) -> bool:
 #     return False
 
 
-def _solve_altcha(sb) -> bool:
-    """完成 Renew 弹窗中的 ALTCHA 验证；未出现验证组件时直接放行。"""
-    print("\n🔐 检查 Renew 弹窗中的 ALTCHA 验证...")
-    time.sleep(1)
-
-    try:
-        if not sb.execute_script(_ALTCHA_PRESENT_JS):
-            print("ℹ️ 未检测到 Renew ALTCHA，继续提交")
-            return True
-        if sb.execute_script(_ALTCHA_SOLVED_JS):
-            print("✅ ALTCHA 已自动通过")
-            return True
-    except Exception as exc:
-        print(f"⚠️ 检查 ALTCHA 状态失败: {exc}")
-
-    # 当前页面通常是 div.altcha 内的必选 checkbox。
-    checkbox_selectors = [
-        'div.modal.show div.altcha input[type="checkbox"][required]',
-        'div.modal.show .altcha input[type="checkbox"]',
-        'div.modal.show input[name*="altcha" i][type="checkbox"]',
-    ]
-    for index, selector in enumerate(checkbox_selectors):
-        try:
-            checkbox = sb.find_element(selector, timeout=10 if index == 0 else 3)
-            if hasattr(checkbox, "is_enabled") and not checkbox.is_enabled():
-                continue
-            print(f"🖱️ 点击 ALTCHA 复选框: {selector}")
-            checkbox.click()
-            for _ in range(16):
-                time.sleep(0.5)
-                if sb.execute_script(_ALTCHA_SOLVED_JS):
-                    print("✅ ALTCHA 验证通过")
-                    return True
-        except Exception:
-            continue
-
-    # ALTCHA 新版组件可能把 checkbox 放在 Shadow DOM 中，Selenium 的普通
-    # CSS 查询看不到它；在当前页面上下文内递归查找并触发原生事件。
-    try:
-        if sb.execute_script(_ALTCHA_CLICK_JS):
-            print("🖱️ 已通过 Shadow DOM 点击 ALTCHA 复选框")
-            for _ in range(20):
-                time.sleep(0.5)
-                if sb.execute_script(_ALTCHA_SOLVED_JS):
-                    print("✅ ALTCHA 验证通过")
-                    return True
-    except Exception as exc:
-        print(f"⚠️ Shadow DOM ALTCHA 点击失败: {exc}")
-
-    # 兼容 ALTCHA 被渲染为跨域 iframe 的版本。
-    try:
-        coords = sb.execute_script(_ALTCHA_EXPAND_JS)
-    except Exception:
-        coords = None
-
-    if coords:
-        try:
-            win = sb.execute_script(_WININFO_JS) or {}
-            title_bar = (win.get("oh") or 800) - (win.get("ih") or 768)
-            x = int(coords["cx"] + (win.get("sx") or 0))
-            y = int(coords["cy"] + (win.get("sy") or 0) + title_bar)
-            print(f"🖱️ ALTCHA iframe 物理点击: ({x}, {y})")
-            _xdotool_click(x, y)
-        except Exception as exc:
-            print(f"⚠️ ALTCHA iframe 定位失败: {exc}")
-
-        for _ in range(20):
-            time.sleep(0.5)
-            try:
-                if sb.execute_script(_ALTCHA_SOLVED_JS):
-                    print("✅ ALTCHA 验证通过")
-                    return True
-            except Exception:
-                pass
-
-    print("❌ ALTCHA 验证未通过")
-    return False
-
-
 def _submit_renew(sb):
     """点击模态框内的 Renew 提交按钮"""
     print("🖱️  点击模态框中的 Renew 按钮...")
-    submit = None
-    for selector in (
-        'div#renew-modal div.modal-footer button[type="submit"]',
-        'div#renew-modal button[type="submit"]',
-        'div.modal.show div.modal-footer button.btn.btn-primary',
-    ):
-        try:
-            submit = sb.find_element(selector, timeout=4)
-            break
-        except Exception:
-            continue
-
-    if submit is not None:
-        try:
-            if hasattr(submit, "is_enabled") and not submit.is_enabled():
-                print("❌ Renew 提交按钮仍处于 disabled 状态")
-                return False
-            submit.click()
-        except Exception as exc:
-            print(f"⚠️ Selenium 点击 Renew 失败: {exc}")
-            submit = None
-
-    if submit is None:
+    try:
+        submit = sb.find_element('div.modal-footer button.btn.btn-primary', timeout=10)
+        submit.click()
+    except Exception:
         sb.execute_script("""
             (function(){
-                var modal = document.querySelector('div#renew-modal.show, div.modal.show');
-                if (!modal) return;
-                var bs = modal.querySelectorAll('button[type="submit"], button');
-                for (var i = 0; i < bs.length; i++) {
-                    if (/renew/i.test(bs[i].textContent || '')) {
-                        bs[i].click();
-                        return;
-                    }
-                }
+                var m = document.querySelector('button.btn.btn-primary');
+                if (!m) return;
+                var bs = m.querySelectorAll('button');
+                for (var i = 0; i < bs.length; i++)
+                    if (/renew/i.test(bs[i].textContent)) bs[i].click();
             })()
         """)
     time.sleep(8)
 
-    try:
-        sb.find_element('div.modal.show', timeout=2)
-        print("⚠️ Renew 模态框提交后仍未关闭，可能验证未通过或请求未提交")
-    except Exception:
-        print("✅ Renew 模态框已关闭，已完成提交动作")
-    return True
 
-
-def _check_renew_result(sb, previous_alerts=None, initial_expiry=None, notify=True):
-    """读取提交后的结果提示，判断续期结果并推送 TG 通知。
-
-    页面原有的 Warning 不是续期结果；优先检查成功、未到时间和明确失败
-    文案，并等待一段时间让异步请求完成。
-    """
+def _check_renew_result(sb):
+    """读取页面 alert 提示，判断续期结果并推送 TG 通知"""
     print("\n📋 检查续期结果...")
-    previous = {
-        (item.get("text") or "").strip().lower()
-        for item in (previous_alerts or [])
-        if item.get("text")
-    }
-    last_alerts = []
+    alert_text = _read_alert(sb)
+    if not alert_text:
+        time.sleep(3)
+        alert_text = _read_alert(sb)
 
-    for _ in range(16):
-        last_alerts = _read_alerts(sb)
-        browser_alert = _read_browser_alert(sb)
-        if browser_alert:
-            last_alerts.insert(0, {"text": browser_alert, "className": "browser-alert"})
-        for item in last_alerts:
-            alert_text = item["text"]
-            low = alert_text.lower()
-
-            # 这个提示会在模态框打开后一直存在，不代表本次续期结果。
-            if "changing the server type" in low:
-                continue
-
-            if "can't renew" in low or "unable" in low:
-                print(f"📩 页面提示: {alert_text}")
-                next_renewal_date = _next_renewal_date_from_alert(alert_text)
-                if next_renewal_date:
-                    print(f"页面可续期日期(标准): {next_renewal_date}")
-                else:
-                    print("⚠️ 未能从页面提示提取下次续期日期")
-                if notify:
-                    send_tg_message("⏳", "未到续期时间", alert_text)
-                return False
-
-            if any(kw in low for kw in ("renewed", "success", "extended")):
-                print(f"📩 页面提示: {alert_text}")
-                send_tg_message("✅", "续期成功", alert_text)
-                return True
-
-            # 仅把提交后出现的、且明显表示失败的提示当作失败。
-            is_new = low not in previous
-            if is_new and any(
-                kw in low for kw in ("failed", "failure", "error", "invalid", "denied")
-            ):
-                print(f"📩 页面提示: {alert_text}")
-                if notify:
-                    send_tg_message("❌", "续期失败", alert_text)
-                return False
-
-        time.sleep(1)
-
-    # 站点成功后有时只更新详情页的 Expiry，不产生 alert/toast。
-    # 刷新一次再比较，避免把真正成功误报成“状态未知”。
-    if initial_expiry:
-        print(f"🔎 未找到提示，核对续期前后的 Expiry: {initial_expiry}")
-        try:
-            sb.refresh()
-            time.sleep(5)
-            final_expiry = _read_server_expiry_date(sb)
-        except Exception as exc:
-            final_expiry = None
-            print(f"⚠️ 刷新详情页核对 Expiry 失败: {exc}")
-
-        if final_expiry and final_expiry != initial_expiry:
-            print(f"✅ Expiry 已更新: {initial_expiry} -> {final_expiry}")
-            send_tg_message("✅", "续期成功", f"Expiry: {final_expiry}")
-            return True
-
-    print("ℹ️ 未检测到明确的续期结果提示，现有提示仅为页面 Warning 或旧提示")
-    if last_alerts:
-        for item in last_alerts:
-            print(f"📩 页面提示: {item['text']}")
-    if notify:
-        send_tg_message("ℹ️", "续期操作未确认", "未检测到明确续期结果")
-    return False
+    if alert_text:
+        print(f"📩 页面提示: {alert_text}")
+        low = alert_text.lower()
+        if "can't renew" in low or "unable" in low:
+            next_renewal_date = _next_renewal_date_from_alert(alert_text)
+            if next_renewal_date:
+                print(f"页面可续期日期(标准): {next_renewal_date}")
+            else:
+                print("⚠️ 未能从页面提示提取下次续期日期")
+            send_tg_message("⏳", "未到续期时间", alert_text)
+        elif any(kw in low for kw in ( "renewed", "success", "extended")):
+            send_tg_message("✅", "续期成功", alert_text)
+        else:
+            send_tg_message("ℹ️", "续期操作已执行", alert_text)
+    else:
+        print("ℹ️ 未检测到明确的提示框，可能续期操作未生效")
+        send_tg_message("ℹ️", "续期操作已执行", "未检测到明确提示")
 
 
 def renew_server(sb):
@@ -976,32 +689,18 @@ def renew_server(sb):
     print("  开始自动续期流程")
     print("#" * 25)
 
-    print("\n🔄 执行续期尝试...")
-
     if not _goto_server_detail(sb):
         return
-
-    initial_expiry = _read_server_expiry_date(sb)
-    if initial_expiry:
-        print(f"📅 续期前 Expiry: {initial_expiry}")
 
     if not _open_renew_modal(sb):
         return
 
-    if not _solve_altcha(sb):
-        send_tg_message("❌", "续期验证失败", "Renew 弹窗中的 ALTCHA 未通过")
-        return
+    # altcha_ok = _solve_altcha(sb)
+    # if not altcha_ok:
+    #     print("⚠️ ALTCHA 验证未通过，仍尝试提交 Renew...")
 
-    previous_alerts = _read_alerts(sb)
-    if not _submit_renew(sb):
-        send_tg_message("❌", "续期提交失败", "Renew 提交按钮不可用或点击失败")
-        return
-    if not _check_renew_result(
-        sb,
-        previous_alerts=previous_alerts,
-        initial_expiry=initial_expiry,
-    ):
-        return
+    _submit_renew(sb)
+    _check_renew_result(sb)
 
 
 #  脚本执行入口 (可选代理)
@@ -1025,13 +724,9 @@ def main():
         # print("✅ 浏览器已启动")
         try:
             sb.open("https://api.ip.sb/ip")
-            ip_text = sb.get_text('body')
-            if "ERR_SOCKS_CONNECTION_FAILED" in ip_text:
-                print("⚠️ 当前 SOCKS5 代理连接失败，VPNGate 可能仍在切换节点；继续尝试登录")
-            else:
-                print(f"📍  当前出口IP: {ip_text}")
+            print(f"📍  当前出口IP: {sb.get_text('body')}")
         except Exception:
-            print("⚠️ 出口 IP 探测失败，继续尝试登录")
+            pass
 
         if login(sb):
             renew_server(sb)   # 登录成功后自动续期

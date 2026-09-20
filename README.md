@@ -1,7 +1,7 @@
 ## 🚀 katabump 自动续期（GitHub Actions）
 
 这是一个基于 GitHub Actions 的自动化脚本，用于定时登录自动续期[katabump](https://dashboard.katabump.com) 应用。
-工作流支持 GitHub 每日定时触发和手动触发。
+工作流支持 GitHub 每日定时触发、Cloudflare Worker 触发和手动触发。
 
 ⚠️ 有cf盾,太垃圾的机房节点可能过不了，建议用稍微干净点的节点,[B2proxy住宅代理](https://www.b2proxy.com/signup?code=0F5133)
 
@@ -15,6 +15,9 @@
 | KATABUMP_PASSWORD  | ✅ 必填  | katabump 登录密码                                    | 
 | TG_BOT_TOKEN       | ❌ 可选  | Telegram Bot Token（用于发送通知）                     |
 | TG_CHAT_ID         | ❌ 可选  | Telegram Chat ID（接收通知的用户或群组 ID）              |
+| CF_ACCOUNT_ID      | ❌ 可选  | Cloudflare Account ID（用于自动更新 Worker Cron）       |
+| CF_WORKER_NAME     | ❌ 可选  | Cloudflare Worker 名称                                  |
+| CF_API_TOKEN       | ❌ 可选  | 具备 `Workers Scripts: Write` 权限的 Cloudflare API Token |
 
 ━━━━━━━━━━━━━━━━━━━━━━
 ### VPNGate SOCKS5 代理
@@ -37,6 +40,6 @@ SOCKS5 端口只绑定到 `127.0.0.1`，不要改成公网监听。
 
 ### 注意事项
 - VPNGate 免费节点质量和存活时间不稳定，无法保证每次都能通过 Katabump 的 Cloudflare 验证；
-- 工作流在启动浏览器前会通过 SOCKS5 实际访问 Katabump，控制接口显示 `connected` 但出口尚未可用时会继续等待；
 - 如果筛选条件下暂时没有可用节点，工作流会等待 300 秒后失败，不会退回直连；
-- 续期会处理 Renew 弹窗中的 ALTCHA，并通过提交前后的 `Expiry` 变化确认成功；页面只有固定 Warning 或没有明确证据时不会报告成功；每次工作流只执行 1 次续期尝试；
+- Cloudflare Worker 请部署仓库根目录的 `workers.js`，并设置 Worker Secrets：`GH_PAT`、`GH_USER`、`GH_REPO`、`AUTH_KEY`、`TG_BOT_TOKEN`、`TG_CHAT_ID`。Worker 与 GitHub Actions 的 Telegram Secret 相互独立，均需配置。
+- Worker 通过 `repository_dispatch` 触发本工作流。首次部署后请手动运行一次工作流：它会读取服务器详情页的 `Expiry` 日期，并把 Worker Cron 改为该日期前一天 08:12（北京时间）。
