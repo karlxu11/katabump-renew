@@ -1,6 +1,8 @@
 name: Katabump Auto Renew
 
 on:
+  schedule:
+    - cron: '0 1 * * *' # 每天UTC 1点 (北京时间9点, 一般都会推迟),自行根据服务到期时间调整
   repository_dispatch:
     types: [cf_timer]
   workflow_dispatch: # 允许手动触发
