@@ -17,7 +17,8 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""      # tg通知bot token(可
 
 BASE_URL = "https://dashboard.katabump.com"  # 网站链接
 _MAX_RENEW_ATTEMPTS = 2  # 首次失败后最多再尝试一次
-_RENEW_RETRY_DELAY_SECONDS = 5
+_RENEW_RETRY_DELAY_SECONDS = 15
+_DASHBOARD_RECONNECT_ATTEMPTS = 3
 
 _MONTHS = {
     "january": 1, "february": 2, "march": 3, "april": 4,
@@ -381,13 +382,48 @@ def login(sb) -> bool:
 
 # ===== 自动续期流程 =====
 
-def _read_alert(sb):
-    """读取页面第一个 Bootstrap alert 的文本，找不到返回空串"""
+def _read_alerts(sb):
+    """读取当前页面可见的提示框。
+
+    续期模态框里会长期显示一个 server type 的 Warning；只读第一个
+    ``div.alert`` 会把它误当成续期结果，因此这里保留所有提示及其 class，
+    由调用方按语义筛选。
+    """
     try:
-        el = sb.find_element("div.alert", timeout=4)
-        return (el.text or "").strip()
+        alerts = sb.execute_script(
+            """
+            return Array.from(document.querySelectorAll('div.alert,[role="alert"]'))
+                .map(function (el) {
+                    var style = window.getComputedStyle(el);
+                    var rect = el.getBoundingClientRect();
+                    return {
+                        text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim(),
+                        className: el.className || '',
+                        visible: style.display !== 'none' && style.visibility !== 'hidden' &&
+                            rect.width > 0 && rect.height > 0
+                    };
+                })
+                .filter(function (item) { return item.visible && item.text; });
+            """
+        ) or []
+        return [item for item in alerts if isinstance(item, dict) and item.get("text")]
     except Exception:
-        return ""
+        return []
+
+
+def _read_alert(sb):
+    """读取第一个可见提示框的文本，找不到返回空串。"""
+    alerts = _read_alerts(sb)
+    return alerts[0]["text"] if alerts else ""
+
+
+def _find_alert(sb, predicate):
+    """返回第一个满足 predicate 的可见提示文本。"""
+    for alert in _read_alerts(sb):
+        text = alert["text"]
+        if predicate(text.lower()):
+            return text
+    return ""
 
 
 def _next_renewal_date_from_alert(alert_text):
@@ -439,8 +475,8 @@ def _goto_server_detail(sb, notify=True) -> bool:
     time.sleep(5)
 
     # 检查页面顶部是否已有"还无法续期"全局提示
-    alert_text = _read_alert(sb)
-    if alert_text and "can't renew" in alert_text.lower():
+    alert_text = _find_alert(sb, lambda text: "can't renew" in text)
+    if alert_text:
         print(f"ℹ️  页面顶部提示: {alert_text}")
         next_renewal_date = _next_renewal_date_from_alert(alert_text)
         if next_renewal_date:
@@ -648,48 +684,100 @@ def _submit_renew(sb):
     except Exception:
         sb.execute_script("""
             (function(){
-                var m = document.querySelector('button.btn.btn-primary');
-                if (!m) return;
-                var bs = m.querySelectorAll('button');
-                for (var i = 0; i < bs.length; i++)
-                    if (/renew/i.test(bs[i].textContent)) bs[i].click();
+                var bs = document.querySelectorAll(
+                    'div.modal.show button.btn.btn-primary, div.modal.show button'
+                );
+                for (var i = 0; i < bs.length; i++) {
+                    if (/renew/i.test(bs[i].textContent || '')) {
+                        bs[i].click();
+                        return;
+                    }
+                }
             })()
         """)
     time.sleep(8)
 
 
-def _check_renew_result(sb, notify=True):
-    """读取页面 alert 提示，判断续期结果并推送 TG 通知。"""
-    print("\n📋 检查续期结果...")
-    alert_text = _read_alert(sb)
-    if not alert_text:
-        time.sleep(3)
-        alert_text = _read_alert(sb)
+def _check_renew_result(sb, previous_alerts=None, notify=True):
+    """读取提交后的结果提示，判断续期结果并推送 TG 通知。
 
-    if alert_text:
-        print(f"📩 页面提示: {alert_text}")
-        low = alert_text.lower()
-        if "can't renew" in low or "unable" in low:
-            next_renewal_date = _next_renewal_date_from_alert(alert_text)
-            if next_renewal_date:
-                print(f"页面可续期日期(标准): {next_renewal_date}")
-            else:
-                print("⚠️ 未能从页面提示提取下次续期日期")
-            if notify:
-                send_tg_message("⏳", "未到续期时间", alert_text)
-            return False
-        elif any(kw in low for kw in ( "renewed", "success", "extended")):
-            send_tg_message("✅", "续期成功", alert_text)
-            return True
-        else:
-            if notify:
-                send_tg_message("ℹ️", "续期操作已执行", alert_text)
-            return False
-    else:
-        print("ℹ️ 未检测到明确的提示框，可能续期操作未生效")
-        if notify:
-            send_tg_message("ℹ️", "续期操作已执行", "未检测到明确提示")
-        return False
+    页面原有的 Warning 不是续期结果；优先检查成功、未到时间和明确失败
+    文案，并等待一段时间让异步请求完成。
+    """
+    print("\n📋 检查续期结果...")
+    previous = {
+        (item.get("text") or "").strip().lower()
+        for item in (previous_alerts or [])
+        if item.get("text")
+    }
+    last_alerts = []
+
+    for _ in range(16):
+        last_alerts = _read_alerts(sb)
+        for item in last_alerts:
+            alert_text = item["text"]
+            low = alert_text.lower()
+
+            # 这个提示会在模态框打开后一直存在，不代表本次续期结果。
+            if "changing the server type" in low:
+                continue
+
+            if "can't renew" in low or "unable" in low:
+                print(f"📩 页面提示: {alert_text}")
+                next_renewal_date = _next_renewal_date_from_alert(alert_text)
+                if next_renewal_date:
+                    print(f"页面可续期日期(标准): {next_renewal_date}")
+                else:
+                    print("⚠️ 未能从页面提示提取下次续期日期")
+                if notify:
+                    send_tg_message("⏳", "未到续期时间", alert_text)
+                return False
+
+            if any(kw in low for kw in ("renewed", "success", "extended")):
+                print(f"📩 页面提示: {alert_text}")
+                send_tg_message("✅", "续期成功", alert_text)
+                return True
+
+            # 仅把提交后出现的、且明显表示失败的提示当作失败。
+            is_new = low not in previous
+            if is_new and any(
+                kw in low for kw in ("failed", "failure", "error", "invalid", "denied")
+            ):
+                print(f"📩 页面提示: {alert_text}")
+                if notify:
+                    send_tg_message("❌", "续期失败", alert_text)
+                return False
+
+        time.sleep(1)
+
+    print("ℹ️ 未检测到明确的续期结果提示，现有提示仅为页面 Warning 或旧提示")
+    if last_alerts:
+        for item in last_alerts:
+            print(f"📩 页面提示: {item['text']}")
+    if notify:
+        send_tg_message("ℹ️", "续期操作未确认", "未检测到明确续期结果")
+    return False
+
+
+def _open_dashboard_with_reconnect(sb) -> bool:
+    """在代理短暂掉线或浏览器进入 chrome-error 页面时恢复 Dashboard。"""
+    print("🌐 重新打开 Dashboard，等待代理恢复...")
+    for attempt in range(1, _DASHBOARD_RECONNECT_ATTEMPTS + 1):
+        try:
+            sb.uc_open_with_reconnect(
+                BASE_URL + "/dashboard", reconnect_time=8
+            )
+            time.sleep(3)
+            current_url = sb.get_current_url()
+            if current_url.startswith(BASE_URL + "/dashboard"):
+                print(f"✅ Dashboard 已恢复（第 {attempt} 次）")
+                return True
+            print(f"⚠️ Dashboard 导航未成功（第 {attempt} 次，URL: {current_url}）")
+        except Exception as exc:
+            print(f"⚠️ Dashboard 导航异常（第 {attempt} 次）: {exc}")
+        if attempt < _DASHBOARD_RECONNECT_ATTEMPTS:
+            time.sleep(5)
+    return False
 
 
 def renew_server(sb):
@@ -705,11 +793,8 @@ def renew_server(sb):
                 "（最多一次）..."
             )
             time.sleep(_RENEW_RETRY_DELAY_SECONDS)
-            try:
-                sb.open(BASE_URL + "/dashboard")
-                time.sleep(5)
-            except Exception as e:
-                print(f"⚠️ 返回 Dashboard 准备重试失败: {e}")
+            if not _open_dashboard_with_reconnect(sb):
+                print("⚠️ 返回 Dashboard 准备重试失败，跳过本次重试")
                 continue
 
         # 首次失败先不发送失败通知，避免重试成功时产生误报；最终结果再通知。
@@ -727,8 +812,9 @@ def renew_server(sb):
         # if not altcha_ok:
         #     print("⚠️ ALTCHA 验证未通过，仍尝试提交 Renew...")
 
+        previous_alerts = _read_alerts(sb)
         _submit_renew(sb)
-        if not _check_renew_result(sb, notify=notify):
+        if not _check_renew_result(sb, previous_alerts=previous_alerts, notify=notify):
             continue
 
         # 续期成功后页面上的 Expiry 才会更新；刷新后再读取，供工作流更新 Cron。
@@ -762,9 +848,13 @@ def main():
         # print("✅ 浏览器已启动")
         try:
             sb.open("https://api.ip.sb/ip")
-            print(f"📍  当前出口IP: {sb.get_text('body')}")
+            ip_text = sb.get_text('body')
+            if "ERR_SOCKS_CONNECTION_FAILED" in ip_text:
+                print("⚠️ 当前 SOCKS5 代理连接失败，VPNGate 可能仍在切换节点；继续尝试登录")
+            else:
+                print(f"📍  当前出口IP: {ip_text}")
         except Exception:
-            pass
+            print("⚠️ 出口 IP 探测失败，继续尝试登录")
 
         if login(sb):
             renew_server(sb)   # 登录成功后自动续期
