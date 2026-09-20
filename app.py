@@ -155,27 +155,37 @@ _SERVER_EXPIRY_JS = """
 _ALTCHA_EXPAND_JS = """
 (function() {
     var modal = document.querySelector('div.modal.show') || document;
-    var iframes = modal.querySelectorAll('iframe');
-    for (var i = 0; i < iframes.length; i++) {
-        var r = iframes[i].getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) {
-            iframes[i].style.width  = '300px';
-            iframes[i].style.height = '150px';
-            iframes[i].style.minWidth  = '300px';
-            iframes[i].style.minHeight = '150px';
-            iframes[i].style.visibility = 'visible';
-            iframes[i].style.opacity = '1';
-            var el = iframes[i];
-            for (var j = 0; j < 10; j++) {
-                el = el.parentElement;
-                if (!el) break;
-                el.style.overflow = 'visible';
+    function find(root) {
+        var iframes = root.querySelectorAll ? root.querySelectorAll('iframe') : [];
+        for (var i = 0; i < iframes.length; i++) {
+            var r = iframes[i].getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) {
+                iframes[i].style.width  = '300px';
+                iframes[i].style.height = '150px';
+                iframes[i].style.minWidth  = '300px';
+                iframes[i].style.minHeight = '150px';
+                iframes[i].style.visibility = 'visible';
+                iframes[i].style.opacity = '1';
+                var el = iframes[i];
+                for (var j = 0; j < 10; j++) {
+                    el = el.parentElement;
+                    if (!el) break;
+                    el.style.overflow = 'visible';
+                }
+                var r2 = iframes[i].getBoundingClientRect();
+                return { cx: Math.round(r2.x + 30), cy: Math.round(r2.y + r2.height / 2) };
             }
-            var r2 = iframes[i].getBoundingClientRect();
-            return { cx: Math.round(r2.x + 30), cy: Math.round(r2.y + r2.height / 2) };
         }
+        var nodes = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (var k = 0; k < nodes.length; k++) {
+            if (nodes[k].shadowRoot) {
+                var nested = find(nodes[k].shadowRoot);
+                if (nested) return nested;
+            }
+        }
+        return null;
     }
-    return null;
+    return find(modal);
 })()
 """
 
@@ -183,31 +193,81 @@ _ALTCHA_EXPAND_JS = """
 _ALTCHA_SOLVED_JS = """
 (function(){
     var modal = document.querySelector('div.modal.show') || document;
-    // hidden input 有值
-    var inputs = modal.querySelectorAll('input[type="hidden"]');
-    for (var i = 0; i < inputs.length; i++) {
-        var n = (inputs[i].name || '').toLowerCase();
-        if ((n.includes('altcha') || n.includes('captcha')) &&
-            inputs[i].value && inputs[i].value.length > 20) return true;
+    function walk(root) {
+        var nodes = [];
+        if (root.matches) nodes.push(root);
+        if (root.querySelectorAll) nodes = nodes.concat(Array.from(root.querySelectorAll('*')));
+        for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            var name = (el.name || '').toLowerCase();
+            var tag = (el.tagName || '').toLowerCase();
+            var state = (el.getAttribute && (
+                el.getAttribute('data-state') || el.getAttribute('state') ||
+                el.getAttribute('status') || el.getAttribute('aria-checked')
+            ) || '').toLowerCase();
+            if ((el.type === 'hidden' && (name.includes('altcha') || name.includes('captcha')) &&
+                 el.value && el.value.length > 20) ||
+                (el.type === 'checkbox' && (el.disabled || el.checked)) ||
+                state === 'verified' || state === 'true' ||
+                el.classList && (el.classList.contains('altcha--verified') ||
+                                  el.classList.contains('altcha-verified'))) return true;
+            if (el.shadowRoot && walk(el.shadowRoot)) return true;
+        }
+        return false;
     }
-    // checkbox 变为 disabled
-    var cbs = modal.querySelectorAll('input[type="checkbox"]');
-    for (var j = 0; j < cbs.length; j++) {
-        if (cbs[j].disabled) return true;
-    }
-    // widget data-state 属性
-    var w = modal.querySelector('[data-state="verified"],.altcha--verified,.altcha-verified');
-    if (w) return true;
-    return false;
+    // token 可能由 widget 写入 modal 外的 form hidden input。
+    return walk(document) || walk(modal);
 })()
 """
 
 _ALTCHA_PRESENT_JS = """
 (function(){
     var modal = document.querySelector('div.modal.show') || document;
-    return !!modal.querySelector(
-        '.altcha, altcha-widget, [name*="altcha" i], iframe[src*="altcha" i]'
-    );
+    function walk(root) {
+        var nodes = [];
+        if (root.matches) nodes.push(root);
+        if (root.querySelectorAll) nodes = nodes.concat(Array.from(root.querySelectorAll('*')));
+        for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            var name = (el.name || '').toLowerCase();
+            var src = (el.src || '').toLowerCase();
+            var tag = (el.tagName || '').toLowerCase();
+            if ((el.classList && el.classList.contains('altcha')) ||
+                tag === 'altcha-widget' || name.includes('altcha') ||
+                src.includes('altcha')) return true;
+            if (el.shadowRoot && walk(el.shadowRoot)) return true;
+        }
+        return false;
+    }
+    return walk(modal);
+})()
+"""
+
+_ALTCHA_CLICK_JS = """
+(function(){
+    var modal = document.querySelector('div.modal.show') || document;
+    function walk(root, insideAltcha) {
+        var nodes = root.children ? Array.from(root.children) :
+            (root.querySelectorAll ? Array.from(root.querySelectorAll(':scope > *')) : []);
+        for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            var name = (el.name || '').toLowerCase();
+            var tag = (el.tagName || '').toLowerCase();
+            var isAltcha = insideAltcha ||
+                (el.classList && el.classList.contains('altcha')) ||
+                tag === 'altcha-widget' || name.includes('altcha');
+            if (isAltcha && el.type === 'checkbox' && !el.disabled && !el.checked) {
+                el.click();
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                return true;
+            }
+            if (el.shadowRoot && walk(el.shadowRoot, isAltcha)) return true;
+            if (walk(el, isAltcha)) return true;
+        }
+        return false;
+    }
+    return walk(modal, false);
 })()
 """
 
@@ -495,20 +555,6 @@ def _next_renewal_date_from_alert(alert_text):
     return candidate.strftime("%Y-%m-%d")
 
 
-def _get_server_expiry_date(sb):
-    """读取续期成功后详情页的 Expiry，作为动态 Cron 的调度依据。"""
-    try:
-        expiry_date = sb.execute_script(_SERVER_EXPIRY_JS)
-    except Exception as e:
-        print(f"⚠️ 读取页面 Expiry 失败: {e}")
-        return None
-    if expiry_date:
-        print(f"续期后下次续期时间(标准): {expiry_date}")
-        return expiry_date
-    print("⚠️ 未能从服务器详情页读取 Expiry 日期")
-    return None
-
-
 def _goto_server_detail(sb, notify=True) -> bool:
     """在 Dashboard 首页查找并点击 See 进入服务器详情页"""
     print("\n🖥️  正在进入服务器续期页...")
@@ -736,9 +782,9 @@ def _solve_altcha(sb) -> bool:
         'div.modal.show .altcha input[type="checkbox"]',
         'div.modal.show input[name*="altcha" i][type="checkbox"]',
     ]
-    for selector in checkbox_selectors:
+    for index, selector in enumerate(checkbox_selectors):
         try:
-            checkbox = sb.find_element(selector, timeout=3)
+            checkbox = sb.find_element(selector, timeout=10 if index == 0 else 3)
             if hasattr(checkbox, "is_enabled") and not checkbox.is_enabled():
                 continue
             print(f"🖱️ 点击 ALTCHA 复选框: {selector}")
@@ -750,6 +796,19 @@ def _solve_altcha(sb) -> bool:
                     return True
         except Exception:
             continue
+
+    # ALTCHA 新版组件可能把 checkbox 放在 Shadow DOM 中，Selenium 的普通
+    # CSS 查询看不到它；在当前页面上下文内递归查找并触发原生事件。
+    try:
+        if sb.execute_script(_ALTCHA_CLICK_JS):
+            print("🖱️ 已通过 Shadow DOM 点击 ALTCHA 复选框")
+            for _ in range(20):
+                time.sleep(0.5)
+                if sb.execute_script(_ALTCHA_SOLVED_JS):
+                    print("✅ ALTCHA 验证通过")
+                    return True
+    except Exception as exc:
+        print(f"⚠️ Shadow DOM ALTCHA 点击失败: {exc}")
 
     # 兼容 ALTCHA 被渲染为跨域 iframe 的版本。
     try:
@@ -943,12 +1002,6 @@ def renew_server(sb):
         initial_expiry=initial_expiry,
     ):
         return
-
-    # 续期成功后页面上的 Expiry 才会更新；刷新后再读取，供工作流更新 Cron。
-    print("\n🔄 重新读取续期后的服务器 Expiry...")
-    sb.refresh()
-    time.sleep(5)
-    _get_server_expiry_date(sb)
 
 
 #  脚本执行入口 (可选代理)
