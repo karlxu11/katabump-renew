@@ -24,7 +24,7 @@ _MONTHS = {
 }
 
 #  Telegram 推送模块
-def send_tg_message(status_icon, status_text, time_left=""):
+def send_tg_message(status_icon, status_text, time_left="", screenshot_path=None):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("ℹ️ 未配置 TG_BOT_TOKEN 或 TG_CHAT_ID，跳过 Telegram 推送。")
         return
@@ -50,16 +50,29 @@ def send_tg_message(status_icon, status_text, time_left=""):
         f"⏱️ 续期时间: {current_time_str}"
     )
 
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TG_CHAT_ID,
-        "text": text
-    }
-    
     try:
-        r = requests.post(url, json=payload, timeout=10)
+        if screenshot_path and os.path.exists(screenshot_path):
+            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
+            with open(screenshot_path, "rb") as screenshot_file:
+                r = requests.post(
+                    url,
+                    data={"chat_id": TG_CHAT_ID, "caption": text},
+                    files={"photo": (os.path.basename(screenshot_path), screenshot_file, "image/png")},
+                    timeout=30,
+                )
+        else:
+            url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+            r = requests.post(
+                url,
+                json={"chat_id": TG_CHAT_ID, "text": text},
+                timeout=10,
+            )
+
         if r.status_code == 200:
-            print("📩 Telegram 通知发送成功！")
+            if screenshot_path and os.path.exists(screenshot_path):
+                print("📩 Telegram 通知和截图发送成功！")
+            else:
+                print("📩 Telegram 通知发送成功！")
         else:
             print(f"⚠️ Telegram 通知发送失败: {r.text}")
     except requests.exceptions.ReadTimeout:
@@ -638,7 +651,7 @@ def _open_renew_modal(sb) -> bool:
 
 
 def _submit_renew(sb):
-    """点击模态框内的 Renew 提交按钮"""
+    """点击模态框内的 Renew 提交按钮，等待并保存结果截图"""
     print("🖱️  点击模态框中的 Renew 按钮...")
     try:
         submit = sb.find_element('div.modal-footer button.btn.btn-primary', timeout=10)
@@ -653,10 +666,20 @@ def _submit_renew(sb):
                     if (/renew/i.test(bs[i].textContent)) bs[i].click();
             })()
         """)
-    time.sleep(8)
+    print("⏳ 提交后等待 10 秒...")
+    time.sleep(10)
+
+    screenshot_path = "renew_result.png"
+    try:
+        sb.save_screenshot(screenshot_path)
+        print(f"📸 已保存续期结果截图: {screenshot_path}")
+        return screenshot_path
+    except Exception as e:
+        print(f"⚠️ 保存续期结果截图失败: {e}")
+        return None
 
 
-def _check_renew_result(sb):
+def _check_renew_result(sb, screenshot_path=None):
     """读取页面 alert 提示，判断续期结果并推送 TG 通知"""
     print("\n📋 检查续期结果...")
     alert_text = _read_alert(sb)
@@ -673,14 +696,14 @@ def _check_renew_result(sb):
                 print(f"页面可续期日期(标准): {next_renewal_date}")
             else:
                 print("⚠️ 未能从页面提示提取下次续期日期")
-            send_tg_message("⏳", "未到续期时间", alert_text)
+            send_tg_message("⏳", "未到续期时间", alert_text, screenshot_path)
         elif any(kw in low for kw in ( "renewed", "success", "extended")):
-            send_tg_message("✅", "续期成功", alert_text)
+            send_tg_message("✅", "续期成功", alert_text, screenshot_path)
         else:
-            send_tg_message("ℹ️", "续期操作已执行", alert_text)
+            send_tg_message("ℹ️", "续期操作已执行", alert_text, screenshot_path)
     else:
         print("ℹ️ 未检测到明确的提示框，可能续期操作未生效")
-        send_tg_message("ℹ️", "续期操作已执行", "未检测到明确提示")
+        send_tg_message("ℹ️", "续期操作已执行", "未检测到明确提示", screenshot_path)
 
 
 def renew_server(sb):
@@ -699,8 +722,8 @@ def renew_server(sb):
     # if not altcha_ok:
     #     print("⚠️ ALTCHA 验证未通过，仍尝试提交 Renew...")
 
-    _submit_renew(sb)
-    _check_renew_result(sb)
+    screenshot_path = _submit_renew(sb)
+    _check_renew_result(sb, screenshot_path)
 
 
 #  脚本执行入口 (可选代理)
