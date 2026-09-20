@@ -42,6 +42,6 @@ SOCKS5 端口只绑定到 `127.0.0.1`，不要改成公网监听。
 - VPNGate 免费节点质量和存活时间不稳定，无法保证每次都能通过 Katabump 的 Cloudflare 验证；
 - 工作流在启动浏览器前会通过 SOCKS5 实际访问 Katabump，控制接口显示 `connected` 但出口尚未可用时会继续等待；
 - 如果筛选条件下暂时没有可用节点，工作流会等待 300 秒后失败，不会退回直连；
-- 续期结果会忽略服务器详情页中固定的 server type Warning；代理短暂掉线时会等待节点恢复并重新打开 Dashboard，最多执行 2 次续期尝试；
+- 续期结果会忽略服务器详情页中固定的 server type Warning；每次工作流只执行 1 次续期尝试；
 - Cloudflare Worker 请部署仓库根目录的 `workers.js`，并设置 Worker Secrets：`GH_PAT`、`GH_USER`、`GH_REPO`、`AUTH_KEY`、`TG_BOT_TOKEN`、`TG_CHAT_ID`。Worker 与 GitHub Actions 的 Telegram Secret 相互独立，均需配置。
 - Worker 通过 `repository_dispatch` 触发本工作流。首次部署后请手动运行一次工作流：它会读取服务器详情页的 `Expiry` 日期，并把 Worker Cron 改为该日期前一天 08:12（北京时间）。

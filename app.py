@@ -16,9 +16,6 @@ TG_CHAT_ID   = os.environ.get("TG_CHAT_ID") or ""        # tg通知 chat id(可�
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""      # tg通知bot token(可选)
 
 BASE_URL = "https://dashboard.katabump.com"  # 网站链接
-_MAX_RENEW_ATTEMPTS = 2  # 首次失败后最多再尝试一次
-_RENEW_RETRY_DELAY_SECONDS = 15
-_DASHBOARD_RECONNECT_ATTEMPTS = 3
 
 _MONTHS = {
     "january": 1, "february": 2, "march": 3, "april": 4,
@@ -759,72 +756,34 @@ def _check_renew_result(sb, previous_alerts=None, notify=True):
     return False
 
 
-def _open_dashboard_with_reconnect(sb) -> bool:
-    """在代理短暂掉线或浏览器进入 chrome-error 页面时恢复 Dashboard。"""
-    print("🌐 重新打开 Dashboard，等待代理恢复...")
-    for attempt in range(1, _DASHBOARD_RECONNECT_ATTEMPTS + 1):
-        try:
-            sb.uc_open_with_reconnect(
-                BASE_URL + "/dashboard", reconnect_time=8
-            )
-            time.sleep(3)
-            current_url = sb.get_current_url()
-            if current_url.startswith(BASE_URL + "/dashboard"):
-                print(f"✅ Dashboard 已恢复（第 {attempt} 次）")
-                return True
-            print(f"⚠️ Dashboard 导航未成功（第 {attempt} 次，URL: {current_url}）")
-        except Exception as exc:
-            print(f"⚠️ Dashboard 导航异常（第 {attempt} 次）: {exc}")
-        if attempt < _DASHBOARD_RECONNECT_ATTEMPTS:
-            time.sleep(5)
-    return False
-
-
 def renew_server(sb):
     """登录成功后调用：自动进入详情页 -> Renew -> ALTCHA -> 提交"""
     print("\n" + "#" * 25)
     print("  开始自动续期流程")
     print("#" * 25)
 
-    for attempt in range(1, _MAX_RENEW_ATTEMPTS + 1):
-        if attempt > 1:
-            print(
-                f"\n🔁 第一次续期未成功，{_RENEW_RETRY_DELAY_SECONDS} 秒后重试"
-                "（最多一次）..."
-            )
-            time.sleep(_RENEW_RETRY_DELAY_SECONDS)
-            if not _open_dashboard_with_reconnect(sb):
-                print("⚠️ 返回 Dashboard 准备重试失败，跳过本次重试")
-                continue
+    print("\n🔄 执行续期尝试...")
 
-        # 首次失败先不发送失败通知，避免重试成功时产生误报；最终结果再通知。
-        notify = attempt == _MAX_RENEW_ATTEMPTS
-        print(f"\n🔄 第 {attempt}/{_MAX_RENEW_ATTEMPTS} 次续期尝试...")
-
-        if not _goto_server_detail(sb, notify=notify):
-            continue
-
-        if not _open_renew_modal(sb):
-            print(f"⚠️ 第 {attempt} 次尝试未能打开 Renew 模态框")
-            continue
-
-        # altcha_ok = _solve_altcha(sb)
-        # if not altcha_ok:
-        #     print("⚠️ ALTCHA 验证未通过，仍尝试提交 Renew...")
-
-        previous_alerts = _read_alerts(sb)
-        _submit_renew(sb)
-        if not _check_renew_result(sb, previous_alerts=previous_alerts, notify=notify):
-            continue
-
-        # 续期成功后页面上的 Expiry 才会更新；刷新后再读取，供工作流更新 Cron。
-        print("\n🔄 重新读取续期后的服务器 Expiry...")
-        sb.refresh()
-        time.sleep(5)
-        _get_server_expiry_date(sb)
+    if not _goto_server_detail(sb):
         return
 
-    print(f"❌ 续期失败，已尝试 {_MAX_RENEW_ATTEMPTS} 次")
+    if not _open_renew_modal(sb):
+        return
+
+    # altcha_ok = _solve_altcha(sb)
+    # if not altcha_ok:
+    #     print("⚠️ ALTCHA 验证未通过，仍尝试提交 Renew...")
+
+    previous_alerts = _read_alerts(sb)
+    _submit_renew(sb)
+    if not _check_renew_result(sb, previous_alerts=previous_alerts):
+        return
+
+    # 续期成功后页面上的 Expiry 才会更新；刷新后再读取，供工作流更新 Cron。
+    print("\n🔄 重新读取续期后的服务器 Expiry...")
+    sb.refresh()
+    time.sleep(5)
+    _get_server_expiry_date(sb)
 
 
 #  脚本执行入口 (可选代理)
