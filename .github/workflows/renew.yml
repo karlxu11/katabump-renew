@@ -1,9 +1,6 @@
 name: Katabump Auto Renew
 
 on:
-  schedule:
-    # GitHub Actions 使用 UTC；北京时间凌晨 3 点 = UTC 前一天 19 点
-    - cron: '0 19 * * *'
   repository_dispatch:
     types: [cf_timer]
   workflow_dispatch: # 允许手动触发
