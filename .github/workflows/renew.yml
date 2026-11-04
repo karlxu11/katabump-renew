@@ -27,6 +27,8 @@ jobs:
         seleniumbase install chromedriver
 
     - name: 📥 准备 VPNGate SOCKS 服务
+      id: prepare_vpngate
+      continue-on-error: true
       env:
         VPNGATE_TO_SOCKS_REF: 337dbaffbfdf69df65f0fc8bdcf6517e45ca18db
       run: |
@@ -37,6 +39,9 @@ jobs:
         git -C vpngate-to-socks apply "$GITHUB_WORKSPACE/.github/vpngate-selection.patch"
 
     - name: 🚇 启动 VPNGate SOCKS5 代理
+      id: start_vpngate
+      if: steps.prepare_vpngate.outcome == 'success'
+      continue-on-error: true
       env:
         VPNGATE_COUNTRY: JP
         VPNGATE_EXCLUDE_KEYWORD: public
@@ -51,9 +56,14 @@ jobs:
         VPNGATE_WAIT_SECONDS: '300'
       run: |
         set -euo pipefail
-        python3 scripts/wait_for_vpngate.py
-        echo "IS_PROXY=true" >> "$GITHUB_ENV"
-        echo "PROXY_SERVER=socks5://127.0.0.1:10080" >> "$GITHUB_ENV"
+        if [ "${{ steps.start_vpngate.outcome }}" = "success" ] && python3 scripts/wait_for_vpngate.py; then
+          echo "IS_PROXY=true" >> "$GITHUB_ENV"
+          echo "PROXY_SERVER=socks5://127.0.0.1:10080" >> "$GITHUB_ENV"
+        else
+          echo "::warning::VPNGate 未建立可用连接，将使用直连继续执行续期脚本。"
+          echo "IS_PROXY=false" >> "$GITHUB_ENV"
+          echo "PROXY_SERVER=" >> "$GITHUB_ENV"
+        fi
 
     - name: 🚀 运行续期脚本
       env:

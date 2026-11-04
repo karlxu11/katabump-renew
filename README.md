@@ -28,7 +28,7 @@ Ubuntu runner 中临时启动 [vpngate-to-socks](https://github.com/shenyanshu/v
 1. 拉取 VPN Gate 节点列表；
 2. 默认只保留日本节点，并排除节点名称中含 `public` 的节点；
 3. 自动连接、监测并在节点失效后重新选择；
-4. 将本机 SOCKS5 `socks5://127.0.0.1:10080` 提供给 `app.py`。
+4. 连接成功时，将本机 SOCKS5 `socks5://127.0.0.1:10080` 提供给 `app.py`；没有可用连接时，自动改为直连继续执行续期脚本。
 
 筛选条件可在 `.github/workflows/renew.yml` 的“启动 VPNGate SOCKS5 代理”步骤中修改：
 
@@ -40,6 +40,6 @@ SOCKS5 端口只绑定到 `127.0.0.1`，不要改成公网监听。
 
 ### 注意事项
 - VPNGate 免费节点质量和存活时间不稳定，无法保证每次都能通过 Katabump 的 Cloudflare 验证；
-- 如果筛选条件下暂时没有可用节点，工作流会等待 300 秒后失败，不会退回直连；
+- 如果筛选条件下暂时没有可用节点，工作流最多等待 300 秒，然后禁用代理并通过直连继续执行续期脚本；VPNGate 准备或启动失败时也会自动回退直连；
 - Cloudflare Worker 请部署仓库根目录的 `workers.js`，并设置 Worker Secrets：`GH_PAT`、`GH_USER`、`GH_REPO`、`AUTH_KEY`、`TG_BOT_TOKEN`、`TG_CHAT_ID`。Worker 与 GitHub Actions 的 Telegram Secret 相互独立，均需配置。
 - Worker 通过 `repository_dispatch` 触发本工作流。首次部署后请手动运行一次工作流：它会读取服务器详情页的 `Expiry` 日期，并把 Worker Cron 改为该日期前一天 08:12（北京时间）。
