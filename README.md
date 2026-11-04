@@ -67,7 +67,10 @@ KV 是最终一致的，同一天的派发记录用于尽量避免重复运行�
 
 - `https://你的Worker地址/?key=AUTH_KEY`：立即检查，只触发当前到期且今天未派发的账号；
 - `https://你的Worker地址/?key=AUTH_KEY&all=1`：强制触发所有账号，可用于初始化；
-- `https://你的Worker地址/schedules?key=AUTH_KEY`：查看 KV 中所有账号的计划（时间字段为 UTC）。
+- `https://你的Worker地址/schedules?key=AUTH_KEY`：浏览器中打开续期计划面板，显示账号概览、调度状态、可续期日期、下次触发时间和最近更新时间；页面统一使用北京时间，支持账号搜索、状态筛选及手机布局。页面只读，刷新不会触发续期。
+- `https://你的Worker地址/schedules?key=AUTH_KEY&format=json`：获取原始 JSON（时间字段保持 UTC）。页面上的“JSON 数据”也可打开此接口；不带 `Accept: text/html` 的脚本请求继续默认返回 JSON。
+
+页面样式和脚本均内嵌在 `workers.js` 中，无需额外安装前端依赖或部署静态文件。更新页面时，将最新的 `workers.js` 重新部署到现有 Cloudflare Worker 即可，保留原有绑定、变量和 Cron 设置。
 
 新增账号后需手动运行一次所有账号以初始化；删除或更换邮箱后，请在 KV 中删除旧账号的 `schedule:` 记录，避免继续派发已不存在的账号。未配置上述三个 Cloudflare Secrets 时，手动运行仍可正常使用，但不会初始化或更新 KV 计划。
 
