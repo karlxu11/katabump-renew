@@ -4,9 +4,12 @@
 import os
 import re
 import json
+import hashlib
 import time
 import subprocess
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from urllib.parse import quote
 import requests
 from seleniumbase import SB
 
@@ -18,6 +21,7 @@ TG_CHAT_ID   = os.environ.get("TG_CHAT_ID") or ""        # tg通知 chat id(可�
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""      # tg通知bot token(可选)
 
 BASE_URL = "https://dashboard.katabump.com"  # 网站链接
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 _MONTHS = {
     "january": 1, "february": 2, "march": 3, "april": 4,
@@ -26,6 +30,38 @@ _MONTHS = {
 }
 
 def load_accounts():
+    accounts = _load_configured_accounts()
+    account_ids = [_account_id(account["email"]) for account in accounts]
+    if len(set(account_ids)) != len(account_ids):
+        raise ValueError("账号配置中存在重复邮箱")
+
+    # 未传筛选条件时，手动运行和旧版 dispatch 仍处理全部账号。
+    raw_targets = os.environ.get("TARGET_ACCOUNT_IDS", "").strip()
+    if raw_targets in ("", "null"):
+        return accounts
+    try:
+        targets = json.loads(raw_targets)
+    except json.JSONDecodeError as e:
+        raise ValueError("TARGET_ACCOUNT_IDS 必须是 JSON 数组") from e
+    if not isinstance(targets, list) or not targets or any(
+        not isinstance(target, str) or not re.fullmatch(r"[a-f0-9]{64}", target)
+        for target in targets
+    ):
+        raise ValueError("TARGET_ACCOUNT_IDS 必须是非空的账号 SHA-256 数组")
+    unknown_targets = set(targets) - set(account_ids)
+    if unknown_targets:
+        print(f"⚠️ {len(unknown_targets)} 个触发账号已不在 Secrets 中，请删除 KV 中对应的 schedule 记录")
+    selected = [account for account in accounts if _account_id(account["email"]) in targets]
+    if not selected:
+        raise ValueError("触发的账号已不在 Secrets 中，请删除 KV 中对应的 schedule 记录")
+    return selected
+
+
+def _account_id(email):
+    return hashlib.sha256(email.strip().lower().encode("utf-8")).hexdigest()
+
+
+def _load_configured_accounts():
     """优先读取多账号 JSON 配置；没有配置时兼容旧的单账号环境变量。"""
     if ACCOUNTS_JSON.strip():
         try:
@@ -427,20 +463,24 @@ def login(sb, email: str, password: str) -> bool:
 # ===== 自动续期流程 =====
 
 def _read_alert(sb):
-    """读取页面第一个 Bootstrap alert 的文本，找不到返回空串"""
+    """优先读取带续期日期的 Bootstrap alert，找不到返回空串。"""
     try:
-        el = sb.find_element("div.alert", timeout=4)
-        return (el.text or "").strip()
+        sb.find_element("div.alert", timeout=4)
+        texts = [(el.text or "").strip() for el in sb.find_elements("div.alert")]
+        return next((text for text in texts if "as of" in text.lower()), next(iter(texts), ""))
     except Exception:
         return ""
 
 
-def _next_renewal_date_from_alert(alert_text):
+def _next_renewal_date_from_alert(alert_text, now=None):
     """从页面的 “as of 27 August” 提示中提取下次可续期日期。"""
     text = alert_text or ""
     iso_match = re.search(r"\bas of\s+(20\d{2}-\d{2}-\d{2})\b", text, re.I)
     if iso_match:
-        return iso_match.group(1)
+        try:
+            return datetime.strptime(iso_match.group(1), "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            return None
 
     date_match = re.search(
         r"\bas of\s+(\d{1,2})\s+([A-Za-z]+)(?:\s+(20\d{2}))?\b", text, re.I
@@ -453,44 +493,167 @@ def _next_renewal_date_from_alert(alert_text):
     if not month:
         return None
 
-    now_bj = datetime.now(timezone.utc) + timedelta(hours=8)
-    year = int(date_match.group(3) or now_bj.year)
-    try:
-        candidate = datetime(year, month, day)
-    except ValueError:
+    now_bj = (now or datetime.now(timezone.utc)).astimezone(BEIJING_TZ)
+    if date_match.group(3):
+        try:
+            return datetime(int(date_match.group(3)), month, day).date().isoformat()
+        except ValueError:
+            return None
+
+    # 页面未给年份时，利用 in N day(s) 辅助判断跨年；不用系统的英文 locale。
+    days_match = re.search(r"\bin\s+(\d{1,5})\s+day", text, re.I)
+    expected = now_bj.date() + timedelta(days=int(days_match.group(1))) if days_match else now_bj.date()
+    candidates = []
+    for year in range(expected.year - 1, expected.year + 3):
+        try:
+            candidate = datetime(year, month, day).date()
+        except ValueError:
+            continue
+        if days_match or candidate >= now_bj.date() - timedelta(days=1):
+            candidates.append(candidate)
+    if not candidates:
         return None
-    if not date_match.group(3) and candidate.date() < (now_bj - timedelta(days=1)).date():
-        candidate = candidate.replace(year=year + 1)
-    return candidate.strftime("%Y-%m-%d")
+    return min(candidates, key=lambda candidate: abs((candidate - expected).days)).isoformat()
+
+
+def _remember_renewal_date(alert_text, schedule_state):
+    renewal_date = _next_renewal_date_from_alert(alert_text)
+    if renewal_date:
+        schedule_state["renewal_date"] = renewal_date
+        print(f"页面可续期日期(标准): {renewal_date}")
+    return renewal_date
+
+
+def _report_account_schedule(account_email, renewal_date):
+    """通过原有三个 Cloudflare Secrets 找到 Worker 绑定的 KV 并写入账号计划。"""
+    account_id = os.environ.get("CF_ACCOUNT_ID", "").strip()
+    worker_name = os.environ.get("CF_WORKER_NAME", "").strip()
+    api_token = os.environ.get("CF_API_TOKEN", "").strip()
+    if not any((account_id, worker_name, api_token)):
+        print("ℹ️ 未配置 Cloudflare API，跳过 KV 调度同步。")
+        return True
+    if not all((account_id, worker_name, api_token)):
+        print("❌ 请同时配置 CF_ACCOUNT_ID / CF_WORKER_NAME / CF_API_TOKEN")
+        return False
+    try:
+        namespace_id = _get_cloudflare_kv_namespace(account_id, worker_name, api_token)
+        key_name = quote(f"schedule:{_account_id(account_email)}", safe="")
+        value_url = (
+            f"https://api.cloudflare.com/client/v4/accounts/{quote(account_id, safe='')}"
+            f"/storage/kv/namespaces/{quote(namespace_id, safe='')}/values/{key_name}"
+        )
+        headers = {"Authorization": f"Bearer {api_token}"}
+        now = datetime.now(timezone.utc)
+        schedule = None
+        if renewal_date is None:
+            # 页面没给出日期时，保留尚未到期的计划；404 表示该账号尚无记录。
+            previous_response = requests.get(value_url, headers=headers, timeout=20)
+            if previous_response.status_code != 404:
+                _check_cloudflare_status(previous_response, "读取账号计划")
+                previous = previous_response.json()
+                next_trigger = datetime.fromisoformat(previous["next_trigger_at"].replace("Z", "+00:00"))
+                if next_trigger > now:
+                    schedule = previous
+
+        if schedule is None:
+            schedule = _build_account_schedule(account_email, renewal_date, now)
+            response = requests.put(
+                value_url,
+                headers={**headers, "Content-Type": "application/octet-stream"},
+                data=json.dumps(schedule).encode("utf-8"),
+                timeout=20,
+            )
+            _cloudflare_result(response, "写入账号计划")
+        next_bj = datetime.fromisoformat(schedule["next_trigger_at"].replace("Z", "+00:00")).astimezone(BEIJING_TZ)
+        print(f"📅 账号 {_mask_email(account_email)} 下次触发: {next_bj:%Y-%m-%d %H:%M}（北京时间）")
+        return True
+    except _CloudflareScheduleError as e:
+        print(f"❌ KV 调度同步失败: {e}")
+        return False
+    except Exception as e:
+        # 不输出 requests 异常全文，避免地址、认证信息进入工作流日志。
+        print(f"❌ KV 调度同步失败: {type(e).__name__}")
+        return False
+
+
+class _CloudflareScheduleError(RuntimeError):
+    pass
+
+
+def _check_cloudflare_status(response, operation):
+    if not response.ok:
+        hint = "，请检查 CF_API_TOKEN 权限" if response.status_code in (401, 403) else ""
+        raise _CloudflareScheduleError(f"{operation}失败 (HTTP {response.status_code}){hint}")
+
+
+def _cloudflare_result(response, operation):
+    _check_cloudflare_status(response, operation)
+    data = response.json()
+    if not isinstance(data, dict) or data.get("success") is not True:
+        raise _CloudflareScheduleError(f"{operation}失败：Cloudflare API 未返回 success=true")
+    return data.get("result")
+
+
+@lru_cache(maxsize=1)
+def _get_cloudflare_kv_namespace(account_id, worker_name, api_token):
+    """从已部署 Worker 的 RENEW_KV 绑定查找 namespace，每次脚本运行只查询一次。"""
+    response = requests.get(
+        f"https://api.cloudflare.com/client/v4/accounts/{quote(account_id, safe='')}"
+        f"/workers/scripts/{quote(worker_name, safe='')}/settings",
+        headers={"Authorization": f"Bearer {api_token}"},
+        timeout=20,
+    )
+    settings = _cloudflare_result(response, "读取 Worker 绑定")
+    for binding in settings.get("bindings", []):
+        if binding.get("name") == "RENEW_KV" and binding.get("type") == "kv_namespace" and binding.get("namespace_id"):
+            return binding["namespace_id"]
+    raise _CloudflareScheduleError("Worker 未绑定名为 RENEW_KV 的 KV namespace")
+
+
+def _build_account_schedule(account_email, renewal_date, now=None):
+    now = (now or datetime.now(timezone.utc)).astimezone(BEIJING_TZ)
+    preferred = None
+    if renewal_date:
+        preferred = datetime.strptime(renewal_date, "%Y-%m-%d").replace(
+            hour=8, minute=12, tzinfo=BEIJING_TZ,
+        ) - timedelta(days=1)
+    # 首选时间已过去或页面未给日期时，次日 08:12 重试。
+    next_trigger = preferred if preferred and preferred > now else (
+        now + timedelta(days=1)
+    ).replace(hour=8, minute=12, second=0, microsecond=0)
+    return {
+        "account_id": _account_id(account_email),
+        "renewal_date": renewal_date,
+        "next_trigger_at": next_trigger.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "updated_at": now.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    }
 
 
 def _get_server_expiry_date(sb):
-    """读取详情页的 Expiry；该日期才是动态 Cron 的调度依据。"""
+    """读取详情页的 Expiry 供日志参考；调度使用 alert 中的可续期日期。"""
     try:
         expiry_date = sb.execute_script(_SERVER_EXPIRY_JS)
     except Exception as e:
         print(f"⚠️ 读取页面 Expiry 失败: {e}")
         return None
     if expiry_date:
-        print(f"下次续期时间(标准): {expiry_date}")
+        print(f"服务器到期日期(仅供参考): {expiry_date}")
         return expiry_date
     print("⚠️ 未能从服务器详情页读取 Expiry 日期")
     return None
 
 
-def _goto_server_detail(sb, account_email: str) -> bool | None:
+def _goto_server_detail(sb, account_email: str, schedule_state) -> bool | None:
     """在 Dashboard 首页查找并点击 See 进入服务器详情页"""
     print("\n🖥️  正在进入服务器续期页...")
     time.sleep(5)
 
     # 检查页面顶部是否已有"还无法续期"全局提示
     alert_text = _read_alert(sb)
-    if alert_text and "can't renew" in alert_text.lower():
+    renewal_date = _remember_renewal_date(alert_text, schedule_state)
+    if renewal_date or "can't renew" in alert_text.lower() or "can’t renew" in alert_text.lower():
         print(f"ℹ️  页面顶部提示: {alert_text}")
-        next_renewal_date = _next_renewal_date_from_alert(alert_text)
-        if next_renewal_date:
-            print(f"页面可续期日期(标准): {next_renewal_date}")
-        else:
+        if not renewal_date:
             print("⚠️ 未能从页面提示提取下次续期日期")
         send_tg_message("ℹ️", "⚠️ 未到续期时间", alert_text, account_email=account_email)
         return None
@@ -549,6 +712,11 @@ def _goto_server_detail(sb, account_email: str) -> bool | None:
     time.sleep(5)
     print(f"📄 当前页面: {sb.get_current_url()}")
     _get_server_expiry_date(sb)
+    alert_text = _read_alert(sb)
+    renewal_date = _remember_renewal_date(alert_text, schedule_state)
+    if renewal_date or "can't renew" in alert_text.lower() or "can’t renew" in alert_text.lower():
+        send_tg_message("ℹ️", "⚠️ 未到续期时间", alert_text, account_email=account_email)
+        return None
     return True
 
 
@@ -712,7 +880,7 @@ def _submit_renew(sb, screenshot_path="renew_result.png"):
         return None
 
 
-def _check_renew_result(sb, screenshot_path=None, account_email=""):
+def _check_renew_result(sb, screenshot_path, account_email, schedule_state):
     """读取页面 alert 提示，判断续期结果并推送 TG 通知"""
     print("\n📋 检查续期结果...")
     alert_text = _read_alert(sb)
@@ -723,15 +891,19 @@ def _check_renew_result(sb, screenshot_path=None, account_email=""):
     if alert_text:
         print(f"📩 页面提示: {alert_text}")
         low = alert_text.lower()
-        if "can't renew" in low or "unable" in low:
-            next_renewal_date = _next_renewal_date_from_alert(alert_text)
-            if next_renewal_date:
-                print(f"页面可续期日期(标准): {next_renewal_date}")
-            else:
+        renewal_date = _remember_renewal_date(alert_text, schedule_state)
+        if renewal_date or "can't renew" in low or "can’t renew" in low or "unable" in low:
+            if not renewal_date:
                 print("⚠️ 未能从页面提示提取下次续期日期")
             send_tg_message("⏳", "未到续期时间", alert_text, screenshot_path, account_email)
         elif any(kw in low for kw in ( "renewed", "success", "extended")):
             send_tg_message("✅", "续期成功", alert_text, screenshot_path, account_email)
+            # 成功提示可能没有下次日期；刷新后再尝试读取页面的可续期提示。
+            try:
+                sb.refresh_page()
+                _remember_renewal_date(_read_alert(sb), schedule_state)
+            except Exception:
+                pass
         else:
             send_tg_message("ℹ️", "续期操作已执行", alert_text, screenshot_path, account_email)
     else:
@@ -739,13 +911,13 @@ def _check_renew_result(sb, screenshot_path=None, account_email=""):
         send_tg_message("ℹ️", "续期操作已执行", "未检测到明确提示", screenshot_path, account_email)
 
 
-def renew_server(sb, account_email: str, account_index: int) -> bool:
+def renew_server(sb, account_email: str, account_index: int, schedule_state) -> bool:
     """登录成功后调用：自动进入详情页 -> Renew -> ALTCHA -> 提交"""
     print("\n" + "#" * 25)
     print("  开始自动续期流程")
     print("#" * 25)
 
-    detail_result = _goto_server_detail(sb, account_email)
+    detail_result = _goto_server_detail(sb, account_email, schedule_state)
     if detail_result is None:
         return True  # 未到续期时间已通知，视为正常处理
     if not detail_result:
@@ -759,7 +931,7 @@ def renew_server(sb, account_email: str, account_index: int) -> bool:
     #     print("⚠️ ALTCHA 验证未通过，仍尝试提交 Renew...")
 
     screenshot_path = _submit_renew(sb, f"renew_result_{account_index}.png")
-    _check_renew_result(sb, screenshot_path, account_email)
+    _check_renew_result(sb, screenshot_path, account_email, schedule_state)
     return True
 
 
@@ -790,6 +962,8 @@ def main():
     failed_accounts = 0
     for index, account in enumerate(accounts, start=1):
         email = account["email"]
+        schedule_state = {"renewal_date": None}
+        account_failed = False
         print("\n" + "=" * 50)
         print(f"👤 处理账号 {index}/{len(accounts)}: {_mask_email(email)}")
         print("=" * 50)
@@ -803,18 +977,23 @@ def main():
                     pass
 
                 if login(sb, email, account["password"]):
-                    if not renew_server(sb, email, index):
+                    if not renew_server(sb, email, index, schedule_state):
                         print("❌ 续期页面流程未能完成，继续处理下一个账号。")
                         send_tg_message("❌", "续期流程失败", "未能打开续期页面或确认框", account_email=email)
-                        failed_accounts += 1
+                        account_failed = True
                 else:
                     print("\n❌ 登录失败，继续处理下一个账号。")
                     send_tg_message("❌", "登录失败", "未知", account_email=email)
-                    failed_accounts += 1
+                    account_failed = True
         except Exception as e:
             error_type = type(e).__name__
             print(f"❌ 账号 {_mask_email(email)} 处理异常: {error_type}")
             send_tg_message("❌", "续期流程异常", error_type, account_email=email)
+            account_failed = True
+        finally:
+            if not _report_account_schedule(email, schedule_state["renewal_date"]):
+                account_failed = True
+        if account_failed:
             failed_accounts += 1
 
     if failed_accounts:

@@ -5,6 +5,10 @@ on:
     types: [cf_timer]
   workflow_dispatch: # 允许手动触发
 
+concurrency:
+  group: katabump-renew-${{ github.event.client_payload.account_ids[0] || 'all' }}
+  cancel-in-progress: false
+
 jobs:
   Renew-Katabump:
     runs-on: ubuntu-latest
@@ -70,6 +74,10 @@ jobs:
         KATABUMP_ACCOUNTS: ${{ secrets.KATABUMP_ACCOUNTS }}
         KATABUMP_EMAIL: ${{ secrets.KATABUMP_EMAIL }}
         KATABUMP_PASSWORD: ${{ secrets.KATABUMP_PASSWORD }}
+        TARGET_ACCOUNT_IDS: ${{ toJSON(github.event.client_payload.account_ids) }}
+        CF_WORKER_NAME: ${{ secrets.CF_WORKER_NAME }}
+        CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       run: |
