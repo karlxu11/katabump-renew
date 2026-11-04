@@ -684,7 +684,7 @@ def _open_renew_modal(sb) -> bool:
 #     return False
 
 
-def _submit_renew(sb):
+def _submit_renew(sb, screenshot_path="renew_result.png"):
     """点击模态框内的 Renew 提交按钮，等待并保存结果截图"""
     print("🖱️  点击模态框中的 Renew 按钮...")
     try:
@@ -703,7 +703,6 @@ def _submit_renew(sb):
     print("⏳ 提交后等待 10 秒...")
     time.sleep(10)
 
-    screenshot_path = "renew_result.png"
     try:
         sb.save_screenshot(screenshot_path)
         print(f"📸 已保存续期结果截图: {screenshot_path}")
