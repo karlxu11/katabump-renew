@@ -11,13 +11,25 @@
 
 | Secret 名称         | 是否必填 | 说明                                              |
 |---------------------|----------|---------------------------------------------------|
-| KATABUMP_EMAIL     | ✅ 必填  | katabump 登录邮箱                                    |
-| KATABUMP_PASSWORD  | ✅ 必填  | katabump 登录密码                                    | 
+| KATABUMP_ACCOUNTS  | 多账号时必填 | 多账号登录信息，使用 JSON 数组配置；设置后优先于单账号 Secrets |
+| KATABUMP_EMAIL     | 单账号必填 | katabump 登录邮箱（兼容原有单账号配置）             |
+| KATABUMP_PASSWORD  | 单账号必填 | katabump 登录密码（兼容原有单账号配置）             |
 | TG_BOT_TOKEN       | ❌ 可选  | Telegram Bot Token（用于发送通知）                     |
 | TG_CHAT_ID         | ❌ 可选  | Telegram Chat ID（接收通知的用户或群组 ID）              |
 | CF_ACCOUNT_ID      | ❌ 可选  | Cloudflare Account ID（用于自动更新 Worker Cron）       |
 | CF_WORKER_NAME     | ❌ 可选  | Cloudflare Worker 名称                                  |
 | CF_API_TOKEN       | ❌ 可选  | 具备 `Workers Scripts: Write` 权限的 Cloudflare API Token |
+
+多账号时，在 GitHub 仓库的 Actions Secrets 中添加 `KATABUMP_ACCOUNTS`，值为 JSON 数组：
+
+```json
+[
+  {"email": "account1@example.com", "password": "第一个账号密码"},
+  {"email": "account2@example.com", "password": "第二个账号密码"}
+]
+```
+
+工作流会按数组顺序逐个登录和续期，每个账号使用独立浏览器会话；一个账号登录或处理失败不会阻止后续账号。Telegram 通知会分别标出脱敏后的账号邮箱。若只配置 `KATABUMP_EMAIL` 和 `KATABUMP_PASSWORD`，仍按原有单账号方式运行。
 
 ━━━━━━━━━━━━━━━━━━━━━━
 ### VPNGate SOCKS5 代理

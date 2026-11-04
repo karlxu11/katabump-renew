@@ -67,6 +67,7 @@ jobs:
 
     - name: 🚀 运行续期脚本
       env:
+        KATABUMP_ACCOUNTS: ${{ secrets.KATABUMP_ACCOUNTS }}
         KATABUMP_EMAIL: ${{ secrets.KATABUMP_EMAIL }}
         KATABUMP_PASSWORD: ${{ secrets.KATABUMP_PASSWORD }}
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
