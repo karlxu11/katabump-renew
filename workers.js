@@ -42,6 +42,10 @@ export default {
 
 const SCHEDULE_PREFIX = "schedule:";
 const BJ_OFFSET_MS = 8 * 60 * 60 * 1000;
+const ACCOUNT_DISPLAY_NAMES = new Map([
+  ["a312dc8f3cf2cb5e4578d4abefa19f756c300973f6f5a56de5733881e031ccfb", "karlzhe"],
+  ["db5f6d44906c3c7639df2ac4818afad1779cb502c1a1f73d0c3d6ac826f12ebf", "karlxu0"],
+]);
 
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -110,6 +114,8 @@ function icon(name, className = "") {
 function scheduleRow(schedule, index, now) {
   const accountId = String(schedule.account_id || "未记录账号");
   const shortId = accountId.length > 20 ? `${accountId.slice(0, 8)}…${accountId.slice(-6)}` : accountId;
+  const displayName = ACCOUNT_DISPLAY_NAMES.get(accountId) || shortId;
+  const accountNote = ACCOUNT_DISPLAY_NAMES.has(accountId) ? shortId : `账号 ${String(index + 1).padStart(2, "0")}`;
   const state = scheduleState(schedule, now);
   const states = { waiting: "计划中", due: "待触发", unknown: "待初始化" };
   const next = beijingParts(schedule.next_trigger_at);
@@ -117,8 +123,8 @@ function scheduleRow(schedule, index, now) {
   const renewal = /^\d{4}-\d{2}-\d{2}$/.test(schedule.renewal_date || "") && Number.isFinite(timestamp(schedule.renewal_date)) &&
     new Date(timestamp(schedule.renewal_date)).toISOString().slice(0, 10) === schedule.renewal_date
     ? schedule.renewal_date : null;
-  return `<tr data-state="${state}" data-account="${escapeHtml(accountId.toLowerCase())}">
-    <td data-label="账号标识"><div class="account-cell"><span class="avatar avatar-${index % 3}">${String(index + 1).padStart(2, "0")}</span><div><span class="account-id" title="${escapeHtml(accountId)}">${escapeHtml(shortId)}</span><span class="cell-note">账号 ${String(index + 1).padStart(2, "0")}</span></div><button type="button" class="copy-button" data-copy="${escapeHtml(accountId)}" aria-label="复制账号 ${String(index + 1).padStart(2, "0")} 的完整标识">${icon("copy")}</button></div></td>
+  return `<tr data-state="${state}" data-account="${escapeHtml(accountId.toLowerCase())}" data-name="${escapeHtml(displayName.toLowerCase())}">
+    <td data-label="账号标识"><div class="account-cell"><span class="avatar avatar-${index % 3}">${String(index + 1).padStart(2, "0")}</span><div><span class="account-id" title="${escapeHtml(accountId)}">${escapeHtml(displayName)}</span><span class="cell-note">${escapeHtml(accountNote)}</span></div><button type="button" class="copy-button" data-copy="${escapeHtml(accountId)}" aria-label="复制账号 ${String(index + 1).padStart(2, "0")} 的完整标识">${icon("copy")}</button></div></td>
     <td data-label="调度状态"><span class="badge ${state}"><span class="status-dot"></span>${states[state]}</span></td>
     <td data-label="可续期日期">${renewal ? `<time datetime="${renewal}">${renewal}</time><span class="cell-note">网站允许续期的日期</span>` : '<span class="muted">尚未获取</span>'}</td>
     <td data-label="下次触发">${next ? `<time datetime="${escapeHtml(schedule.next_trigger_at)}">${next.date}<span class="time-part">${next.time}</span></time><span class="cell-note ${state === "due" ? "text-amber" : "text-green"}">${relativeTime(schedule.next_trigger_at, now)}</span>` : '<span class="muted">等待初始化</span>'}</td>
@@ -301,7 +307,7 @@ function schedulesResponse(schedules, now = Date.now()) {
       <div class="panel-header"><div><div class="table-title"><h2 id="schedule-heading">账号续期计划</h2><span class="count-pill">${schedules.length}</span></div><p class="panel-description">每个账号独立调度，按下次触发时间排序</p></div><span class="zone">${icon("clock")}北京时间 · UTC+8</span></div>
       <div class="table-tools" id="table-tools" hidden>
         <div class="filters" role="group" aria-label="筛选调度状态">${filters.map(([state, label, count]) => `<button type="button" class="filter" data-filter="${state}" aria-pressed="${state === "all"}">${label}<span class="filter-count">${count}</span></button>`).join("")}</div>
-        <label class="search">${icon("search")}<span class="sr-only">搜索账号标识</span><input id="account-search" type="search" placeholder="搜索账号标识…" autocomplete="off" spellcheck="false"></label>
+        <label class="search">${icon("search")}<span class="sr-only">搜索账号名称或标识</span><input id="account-search" type="search" placeholder="搜索账号名称或标识…" autocomplete="off" spellcheck="false"></label>
       </div>
       <table aria-labelledby="schedule-heading"><thead><tr><th scope="col">账号标识</th><th scope="col">调度状态</th><th scope="col">可续期日期</th><th scope="col">下次触发</th><th scope="col">最近更新</th></tr></thead><tbody id="schedule-rows">${sorted.map((schedule, index) => scheduleRow(schedule, index, now)).join("")}</tbody></table>
       <div class="empty-state" id="empty-state"${schedules.length ? " hidden" : ""}>${icon("inbox")}<h3 id="empty-title">还没有续期计划</h3><p id="empty-description">在 GitHub Actions 中手动运行一次续期工作流，<br>即可初始化账号并在这里查看计划。</p></div>
@@ -325,7 +331,8 @@ function schedulesResponse(schedules, now = Date.now()) {
         const query = search.value.trim().toLowerCase();
         let visible = 0;
         rows.forEach(row => {
-          row.hidden = (state !== 'all' && row.dataset.state !== state) || !row.dataset.account.includes(query);
+          row.hidden = (state !== 'all' && row.dataset.state !== state) ||
+            !(row.dataset.account.includes(query) || row.dataset.name.includes(query));
           if (!row.hidden) visible++;
         });
         empty.hidden = visible > 0;
