@@ -82,19 +82,23 @@ class ScheduleTests(unittest.TestCase):
     def schedule(self, renewal_date, now="2026-11-04T04:00:00+00:00"):
         return app._build_account_schedule("one@example.com", renewal_date, datetime.fromisoformat(now))
 
-    def test_one_day_early_and_month_year_rollover(self):
+    def test_triggers_on_renewal_date_including_month_year_and_leap_day(self):
         for renewal_date, expected in [
-            ("2026-11-07", "2026-11-06T00:12:00.000Z"),
-            ("2026-12-01", "2026-11-30T00:12:00.000Z"),
-            ("2027-01-01", "2026-12-31T00:12:00.000Z"),
-            ("2028-03-01", "2028-02-29T00:12:00.000Z"),
+            ("2026-11-07", "2026-11-07T00:12:00.000Z"),
+            ("2026-12-01", "2026-12-01T00:12:00.000Z"),
+            ("2027-01-01", "2027-01-01T00:12:00.000Z"),
+            ("2028-02-29", "2028-02-29T00:12:00.000Z"),
+            ("2028-03-01", "2028-03-01T00:12:00.000Z"),
         ]:
             with self.subTest(renewal_date=renewal_date):
                 self.assertEqual(self.schedule(renewal_date)["next_trigger_at"], expected)
 
     def test_past_preferred_time_retries_next_day(self):
-        self.assertEqual(self.schedule("2026-11-07", "2026-11-06T04:00:00+00:00")["next_trigger_at"], "2026-11-07T00:12:00.000Z")
-        self.assertEqual(self.schedule("2026-11-07", "2026-11-06T00:12:00+00:00")["next_trigger_at"], "2026-11-07T00:12:00.000Z")
+        self.assertEqual(self.schedule("2026-11-07", "2026-11-07T04:00:00+00:00")["next_trigger_at"], "2026-11-08T00:12:00.000Z")
+        self.assertEqual(self.schedule("2026-11-07", "2026-11-07T00:12:00+00:00")["next_trigger_at"], "2026-11-08T00:12:00.000Z")
+
+    def test_before_daily_trigger_keeps_same_day(self):
+        self.assertEqual(self.schedule("2026-11-07", "2026-11-07T00:11:59+00:00")["next_trigger_at"], "2026-11-07T00:12:00.000Z")
 
     def test_unknown_date_retries_next_beijing_day(self):
         self.assertEqual(self.schedule(None)["next_trigger_at"], "2026-11-05T00:12:00.000Z")
@@ -145,7 +149,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(kwargs["timeout"], 20)
         self.assertEqual(json.loads(kwargs["data"]), {
             "account_id": app._account_id("one@example.com"), "renewal_date": "2026-11-07",
-            "next_trigger_at": "2026-11-06T00:12:00.000Z", "updated_at": "2026-11-04T04:00:00.000Z",
+            "next_trigger_at": "2026-11-07T00:12:00.000Z", "updated_at": "2026-11-04T04:00:00.000Z",
         })
 
     def test_binding_lookup_is_cached_across_accounts(self):

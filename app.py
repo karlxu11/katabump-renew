@@ -616,7 +616,7 @@ def _build_account_schedule(account_email, renewal_date, now=None):
     if renewal_date:
         preferred = datetime.strptime(renewal_date, "%Y-%m-%d").replace(
             hour=8, minute=12, tzinfo=BEIJING_TZ,
-        ) - timedelta(days=1)
+        )
     # 首选时间已过去或页面未给日期时，次日 08:12 重试。
     next_trigger = preferred if preferred and preferred > now else (
         now + timedelta(days=1)
