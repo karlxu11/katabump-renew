@@ -868,8 +868,9 @@ def _submit_renew(sb, screenshot_path="renew_result.png"):
                     if (/renew/i.test(bs[i].textContent)) bs[i].click();
             })()
         """)
-    print("⏳ 提交后等待 10 秒...")
-    time.sleep(10)
+    # 为按钮的 Verifying 阶段额外预留 10 秒，再截图和检查续期结果。
+    print("⏳ 提交后等待 20 秒，等待续期验证完成...")
+    time.sleep(20)
 
     try:
         sb.save_screenshot(screenshot_path)
