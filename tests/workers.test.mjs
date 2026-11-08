@@ -123,6 +123,73 @@ test("手动强制初始化全部账号，普通 URL 只检查到期账号", asy
   assert.deepEqual(dispatches, [{ event_type: "cf_timer" }]);
 });
 
+test("页面立即触发全部账号，空计划也可以初始化，不需要等到计划时间", async () => {
+  const response = await request("/trigger", {});
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), {
+    dispatched: "all", message: "全部账号的续期任务已提交", actions_url: "https://github.com/owner/repo/actions",
+  });
+  assert.deepEqual(dispatches, [{ event_type: "cf_timer" }]);
+  assert.equal(env.RENEW_KV.data.size, 0);
+});
+
+test("单个账号手动触发跳过计划时间及同日回执，不改写计划和回执", async () => {
+  await saveSchedule(ACCOUNT_A, "2026-11-26T00:12:00.000Z");
+  await saveSchedule(ACCOUNT_B, "2026-11-27T00:12:00.000Z");
+  await env.RENEW_KV.put(`dispatch:2026-11-04:${ACCOUNT_A}`, "previous dispatch");
+  const before = [...env.RENEW_KV.data.entries()];
+  const response = await request("/trigger", { account_id: ACCOUNT_A });
+  assert.equal(response.status, 202);
+  assert.equal((await response.json()).dispatched, 1);
+  assert.deepEqual(dispatches, [{ event_type: "cf_timer", client_payload: { account_ids: [ACCOUNT_A] } }]);
+  assert.deepEqual([...env.RENEW_KV.data.entries()], before);
+});
+
+test("手动触发拒绝无效或不存在的账号，不意外派发全部账号", async () => {
+  for (const account_id of [null, "", "invalid", [ACCOUNT_A], 1, "A".repeat(64)]) {
+    assert.equal((await request("/trigger", { account_id })).status, 400);
+  }
+  assert.equal((await request("/trigger", { account_id: ACCOUNT_A })).status, 404);
+  assert.equal((await request("/trigger", { account_ids: [ACCOUNT_A] })).status, 400);
+  assert.equal(dispatches.length, 0);
+});
+
+test("页面派发需要认证、POST、JSON 和同源请求", async () => {
+  assert.equal((await worker.fetch(new Request("https://worker.example/trigger", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+  }), env)).status, 401);
+  assert.equal((await request("/trigger")).status, 404);
+  for (const [headers, body, status] of [
+    [{ "Content-Type": "text/plain" }, "{}", 415],
+    [{ "Content-Type": "application/json", Origin: "https://other.example" }, "{}", 403],
+    [{ "Content-Type": "application/json", Origin: "null" }, "{}", 403],
+    [{ "Content-Type": "application/json" }, "{broken", 400],
+    [{ "Content-Type": "application/json" }, "null", 400],
+    [{ "Content-Type": "application/json" }, "[]", 400],
+  ]) {
+    const response = await worker.fetch(new Request("https://worker.example/trigger", {
+      method: "POST", headers: { Authorization: "Bearer test-key", ...headers }, body,
+    }), env);
+    assert.equal(response.status, status);
+  }
+  assert.equal(dispatches.length, 0);
+  const response = await worker.fetch(new Request("https://worker.example/trigger?key=test-key", {
+    method: "POST", headers: { "Content-Type": "application/json; charset=utf-8", Origin: "https://worker.example" }, body: "{}",
+  }), env);
+  assert.equal(response.status, 202);
+  assert.equal(dispatches.length, 1);
+});
+
+test("页面派发失败显示错误并允许重试，不报告成功或写入 KV", async () => {
+  globalThis.fetch.mock.mockImplementation(async () => new Response("unavailable", { status: 503 }));
+  const response = await request("/trigger", {});
+  assert.equal(response.status, 500);
+  assert.match((await response.json()).error, /GitHub 触发失败 \(503\)/);
+  assert.equal(env.RENEW_KV.data.size, 0);
+  globalThis.fetch.mock.mockImplementation(async () => new Response(null, { status: 204 }));
+  assert.equal((await request("/trigger", {})).status, 202);
+});
+
 test("所有读写和手动派发都需要认证，保留 query key 兼容", async () => {
   for (const path of ["/", "/?all=1", "/schedules", "/schedule"]) {
     const response = await worker.fetch(new Request(`https://worker.example${path}`), env);
@@ -164,7 +231,7 @@ function browserRequest(path = "/schedules") {
   }), env);
 }
 
-test("浏览器显示只读续期面板，日期使用北京时间并按下次触发排序", async () => {
+test("打开续期面板不派发任务，日期使用北京时间并按下次触发排序", async () => {
   await env.RENEW_KV.put(`schedule:${ACCOUNT_B}`, JSON.stringify({
     account_id: ACCOUNT_B, renewal_date: "2026-11-08", next_trigger_at: "2026-11-07T00:12:00.000Z",
   }));

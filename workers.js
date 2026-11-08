@@ -16,6 +16,9 @@ export default {
 
     try {
       requireKV(env);
+      if (url.pathname === "/trigger" && request.method === "POST") {
+        return await triggerFromDashboard(request, env);
+      }
       if (url.pathname === "/schedules" && request.method === "GET") {
         const schedules = await listSchedules(env);
         // 浏览器显示控制台；原有脚本请求与显式 JSON 请求继续返回相同的数据格式。
@@ -58,6 +61,45 @@ function requireKV(env) {
   if (!env.RENEW_KV) throw new Error("请绑定 Cloudflare KV，变量名为 RENEW_KV");
 }
 
+async function triggerFromDashboard(request, env) {
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== new URL(request.url).origin) {
+    return jsonResponse({ error: "请从续期计划页面发起操作" }, 403);
+  }
+  if (request.headers.get("Content-Type")?.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
+    return jsonResponse({ error: "请求需要使用 application/json" }, 415);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "请求内容不是有效的 JSON" }, 400);
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return jsonResponse({ error: "请求内容必须是 JSON 对象" }, 400);
+  }
+  if (Object.keys(body).some(key => key !== "account_id")) {
+    return jsonResponse({ error: "请求包含不支持的字段" }, 400);
+  }
+  let accountIds;
+  if (Object.hasOwn(body, "account_id")) {
+    if (typeof body.account_id !== "string" || !/^[a-f0-9]{64}$/.test(body.account_id)) {
+      return jsonResponse({ error: "账号标识无效" }, 400);
+    }
+    const schedule = await env.RENEW_KV.get(`${SCHEDULE_PREFIX}${body.account_id}`, "json");
+    if (schedule?.account_id !== body.account_id) {
+      return jsonResponse({ error: "未找到该账号的续期计划，请刷新页面" }, 404);
+    }
+    accountIds = [body.account_id];
+  }
+  const result = await triggerGithubAction(env, "Schedule dashboard (manual)", accountIds);
+  return jsonResponse({
+    dispatched: result.dispatched,
+    message: accountIds ? "该账号的续期任务已提交" : "全部账号的续期任务已提交",
+    actions_url: `https://github.com/${encodeURIComponent(env.GH_USER)}/${encodeURIComponent(env.GH_REPO)}/actions`,
+  }, 202);
+}
+
 // 页面与 Worker 放在同一文件中，保持直接上传 workers.js 的部署方式。
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, character => ({
@@ -97,6 +139,7 @@ function icon(name, className = "") {
     layers: '<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/>',
     arrow: '<path d="M7 17 17 7M7 7h10v10"/>',
     refresh: '<path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17"/>',
+    play: '<path d="m8 5 11 7-11 7V5Z"/>',
     users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M22 21v-2a4 4 0 0 0-3-3.9"/><circle cx="9" cy="7" r="4"/><path d="M16 3.1a4 4 0 0 1 0 7.8"/>',
     clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     calendar: '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M16 3v4M8 3v4M3 11h18m-12 5 2 2 4-4"/>',
@@ -129,6 +172,7 @@ function scheduleRow(schedule, index, now) {
     <td data-label="可续期日期">${renewal ? `<time datetime="${renewal}">${renewal}</time><span class="cell-note">网站允许续期的日期</span>` : '<span class="muted">尚未获取</span>'}</td>
     <td data-label="下次触发">${next ? `<time datetime="${escapeHtml(schedule.next_trigger_at)}">${next.date}<span class="time-part">${next.time}</span></time><span class="cell-note ${state === "due" ? "text-amber" : "text-green"}">${relativeTime(schedule.next_trigger_at, now)}</span>` : '<span class="muted">等待初始化</span>'}</td>
     <td data-label="最近更新">${updated ? `<time datetime="${escapeHtml(schedule.updated_at)}">${updated.date}<span class="time-part">${updated.time}</span></time>` : '<span class="muted">暂无记录</span>'}</td>
+    <td data-label="操作">${/^[a-f0-9]{64}$/.test(accountId) ? `<button type="button" class="button trigger-account" data-trigger="${escapeHtml(accountId)}" data-label="${escapeHtml(displayName)}" aria-label="立即触发 ${escapeHtml(displayName)} 的续期" hidden>${icon("play")}<span>立即触发</span></button>` : '<span class="muted">暂无可用操作</span>'}</td>
   </tr>`;
 }
 
@@ -190,6 +234,14 @@ function schedulesResponse(schedules, now = Date.now()) {
     .button .icon { width: 15px; height: 15px; }
     .button-primary { color: #fff; background: var(--green); border-color: var(--green); box-shadow: 0 3px 5px #24644d12; }
     .button-primary:hover { background: #1a523d; border-color: #1a523d; }
+    .button:disabled { cursor: wait; opacity: .6; }
+    .trigger-account { padding: 8px 10px; color: var(--green); background: #f5f8f2; font-size: 11px; }
+    .trigger-account .icon { width: 13px; height: 13px; }
+    .trigger-feedback { display: flex; align-items: flex-start; gap: 12px; margin: 0 0 24px; padding: 17px 20px; border: 1px solid #cddfcf; border-radius: 12px; color: #315f40; background: #edf5eb; }
+    .trigger-feedback.error { color: #94472f; background: #fff3ec; border-color: #efd6c7; }
+    .trigger-feedback strong { font-size: 13px; font-weight: 600; }
+    .trigger-feedback p { margin: 6px 0 0; font-size: 12px; line-height: 1.8; }
+    .trigger-feedback a { display: inline-block; margin-top: 7px; font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
     .hero-actions { display: flex; gap: 10px; }
     .stats { display: grid; grid-template-columns: 1fr 1fr 1.18fr; gap: 20px; margin: 0 0 28px; }
     .stat { position: relative; padding: 25px 26px 22px; border: 1px solid var(--border); border-radius: 14px; background: #fff; box-shadow: 0 2px 3px #243b3502; }
@@ -226,6 +278,7 @@ function schedulesResponse(schedules, now = Date.now()) {
     .search input { width: 100%; min-width: 0; border: 0; padding: 10px 0; background: transparent; font-size: 12px; color: #3b5947; }
     .search input::placeholder { color: #6d7f70; }
     .search input:focus-visible { outline-offset: 2px; }
+    .table-scroll { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; text-align: left; table-layout: auto; font-size: 13px; }
     th { padding: 14px 20px; border-top: 1px solid #edf0eb; border-bottom: 1px solid #edf0eb; background: #f8faf7; color: #6b7e6d; font-size: 12px; font-weight: 500; white-space: nowrap; }
     td { padding: 25px 20px; border-bottom: 1px solid #edf0eb; }
@@ -284,6 +337,16 @@ function schedulesResponse(schedules, now = Date.now()) {
       .avatar { width: 31px; height: 35px; border-radius: 8px; } .account-id { font-size: 11px; } .account-cell { gap: 9px; } .copy-button { padding: 4px; } .time-part { display: inline; margin-left: 6px; } .panel-footer { padding: 15px 18px; font-size: 9px; } .notice { padding-top: 16px; } .notice p { font-size: 10px; } .footer-inner { flex-wrap: wrap; padding-block: 20px; font-size: 9px; } .footer-caption { gap: 7px; }
     }
     @media (max-width: 380px) { .hero { gap: 10px; } .button-primary span { display: none; } .button-primary { padding: 10px; } .stat-next dd { font-size: 20px; } .next-time { font-size: 13px; } .account-id { font-size: 10px; } }
+    @media (max-width: 760px) {
+      .hero { flex-direction: column; gap: 18px; }
+      .hero-actions { padding-top: 0; width: 100%; }
+      .hero-actions .button { flex: 1; }
+      .hero-actions .button-primary span { display: inline; }
+      .trigger-feedback { padding: 15px; }
+      td:nth-child(6) { grid-column: 1 / -1; grid-row: 4; }
+      td:nth-child(6)::before { display: none; }
+      .trigger-account { width: 100%; padding: 11px; }
+    }
     @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
   </style>
 </head>
@@ -296,8 +359,9 @@ function schedulesResponse(schedules, now = Date.now()) {
     <nav class="breadcrumb" aria-label="当前位置"><span>工作台</span>${icon("chevron")}<span>续期计划</span></nav>
     <section class="hero" aria-labelledby="page-title">
       <div><p class="eyebrow">RENEWAL SCHEDULE</p><h1 id="page-title">让每一次续期，<br class="sr-only">都有安排<span class="text-green">。</span></h1><p class="description">所有账号的续期计划，一目了然。到期后自动触发，省心一点。</p></div>
-      <div class="hero-actions"><a class="button button-secondary" id="json-link" href="" hidden>${icon("code")}JSON 数据</a><a class="button button-primary" href="">${icon("refresh")}<span>刷新计划</span></a></div>
+      <div class="hero-actions"><a class="button button-secondary" id="json-link" href="" hidden>${icon("code")}JSON 数据</a><a class="button" href="">${icon("refresh")}<span>刷新计划</span></a><button type="button" class="button button-primary" data-trigger="" data-label="全部账号" hidden>${icon("play")}<span>立即触发全部</span></button></div>
     </section>
+    <div class="trigger-feedback" id="trigger-feedback" role="status" aria-live="polite" hidden>${icon("info")}<div><strong id="trigger-title"></strong><p id="trigger-detail"></p><a id="actions-link" href="" target="_blank" rel="noopener noreferrer" hidden>查看 GitHub Actions 运行记录 ↗</a></div></div>
     <dl class="stats" aria-label="计划概览">
       <div class="stat"><dt class="stat-label">管理中的账号<span class="stat-icon">${icon("users")}</span></dt><dd>${schedules.length}<span class="unit">个</span></dd><p class="stat-note">${counts.waiting} 个计划中${counts.unknown ? ` · ${counts.unknown} 个待初始化` : schedules.length ? " · 续期计划已同步" : " · 等待首次同步"}</p></div>
       <div class="stat"><dt class="stat-label">已到期 · 待触发<span class="stat-icon">${icon("clock")}</span></dt><dd>${counts.due}<span class="unit">个</span></dd><p class="stat-note">${counts.due ? "等待定时检查或计划回写" : "暂时没有到期的续期计划"}</p></div>
@@ -309,11 +373,11 @@ function schedulesResponse(schedules, now = Date.now()) {
         <div class="filters" role="group" aria-label="筛选调度状态">${filters.map(([state, label, count]) => `<button type="button" class="filter" data-filter="${state}" aria-pressed="${state === "all"}">${label}<span class="filter-count">${count}</span></button>`).join("")}</div>
         <label class="search">${icon("search")}<span class="sr-only">搜索账号名称或标识</span><input id="account-search" type="search" placeholder="搜索账号名称或标识…" autocomplete="off" spellcheck="false"></label>
       </div>
-      <table aria-labelledby="schedule-heading"><thead><tr><th scope="col">账号标识</th><th scope="col">调度状态</th><th scope="col">可续期日期</th><th scope="col">下次触发</th><th scope="col">最近更新</th></tr></thead><tbody id="schedule-rows">${sorted.map((schedule, index) => scheduleRow(schedule, index, now)).join("")}</tbody></table>
-      <div class="empty-state" id="empty-state"${schedules.length ? " hidden" : ""}>${icon("inbox")}<h3 id="empty-title">还没有续期计划</h3><p id="empty-description">在 GitHub Actions 中手动运行一次续期工作流，<br>即可初始化账号并在这里查看计划。</p></div>
+      <div class="table-scroll"><table aria-labelledby="schedule-heading"><thead><tr><th scope="col">账号标识</th><th scope="col">调度状态</th><th scope="col">可续期日期</th><th scope="col">下次触发</th><th scope="col">最近更新</th><th scope="col">操作</th></tr></thead><tbody id="schedule-rows">${sorted.map((schedule, index) => scheduleRow(schedule, index, now)).join("")}</tbody></table></div>
+      <div class="empty-state" id="empty-state"${schedules.length ? " hidden" : ""}>${icon("inbox")}<h3 id="empty-title">还没有续期计划</h3><p id="empty-description">点击“立即触发全部”或手动运行 GitHub Actions，<br>即可初始化账号并在这里查看计划。</p></div>
       <div class="panel-footer"><span id="result-count" role="status">共 <strong>${schedules.length}</strong> 个账号</span><span class="legend"><span class="status-dot"></span>计划随续期结果更新</span></div>
     </section>
-    <aside class="notice" aria-label="调度说明">${icon("info")}<p><strong>计划会自己往前走。</strong> 到期账号将在下一次定时检查时尝试触发，续期后自动更新下一次计划。<br>此页仅供查看；状态按计划时间计算，不代表 GitHub Actions 实时状态。数据同步可能有短暂延迟。</p></aside>
+    <aside class="notice" aria-label="调度说明">${icon("info")}<p><strong>计划会自己往前走。</strong> 到期账号将在下一次定时检查时尝试触发，续期后自动更新下一次计划。<br>“立即触发”会跳过计划时间，提交续期任务；实际开始时间由 GitHub Actions 排队情况决定。状态按计划时间计算，数据同步可能有短暂延迟。</p></aside>
   </main>
   <footer><div class="shell footer-inner"><span class="footer-brand">${icon("layers")}Katabump Renew<span class="muted">/</span>让服务持续在线</span><span class="footer-caption">本次同步 <time datetime="${new Date(now).toISOString()}">${current.date} ${current.time}</time><span>UTC+8</span></span></div></footer>
   <div id="toast" class="toast" role="status" hidden></div>
@@ -348,6 +412,76 @@ function schedulesResponse(schedules, now = Date.now()) {
         filterRows();
       }));
       search.addEventListener('input', filterRows);
+      const triggerButtons = Array.from(document.querySelectorAll('[data-trigger]'));
+      const feedback = document.getElementById('trigger-feedback');
+      const triggerTitle = document.getElementById('trigger-title');
+      const triggerDetail = document.getElementById('trigger-detail');
+      const actionsLink = document.getElementById('actions-link');
+      let triggering = false;
+      const cooldowns = new Set();
+      function updateTriggerButtons() {
+        triggerButtons.forEach(item => { item.disabled = triggering || cooldowns.has(item); });
+      }
+      triggerButtons.forEach(button => {
+        button.hidden = false;
+        button.addEventListener('click', async () => {
+          if (triggering || button.disabled) return;
+          triggering = true;
+          updateTriggerButtons();
+          const label = button.querySelector('span');
+          const originalLabel = label.textContent;
+          label.textContent = '提交中…';
+          button.setAttribute('aria-busy', 'true');
+          feedback.hidden = false;
+          feedback.classList.remove('error');
+          triggerTitle.textContent = '正在提交 ' + button.dataset.label + ' 的续期任务…';
+          triggerDetail.textContent = '请稍候，提交结果会显示在这里。';
+          actionsLink.hidden = true;
+          feedback.scrollIntoView({ block: 'nearest' });
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 35000);
+          let submitted = false;
+          try {
+            const triggerUrl = new URL('/trigger', window.location.href);
+            const key = new URL(window.location.href).searchParams.get('key');
+            const headers = { 'Content-Type': 'application/json' };
+            if (key) headers.Authorization = 'Bearer ' + key;
+            const response = await fetch(triggerUrl, {
+              method: 'POST', headers, signal: controller.signal,
+              body: JSON.stringify(button.dataset.trigger ? { account_id: button.dataset.trigger } : {}),
+            });
+            if (response.status === 401) throw new Error('认证已失效，请使用有效的访问链接重新打开页面。');
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || '提交失败，请稍后重试。');
+            submitted = true;
+            triggerTitle.textContent = button.dataset.label + '：续期任务已提交';
+            triggerDetail.textContent = 'GitHub Actions 将尽快运行。完成后刷新计划查看更新时间；任务提交不代表续期已经完成。';
+            actionsLink.href = result.actions_url;
+            actionsLink.hidden = false;
+            label.textContent = '已触发';
+          } catch (error) {
+            feedback.classList.add('error');
+            triggerTitle.textContent = '触发失败';
+            triggerDetail.textContent = error.name === 'AbortError'
+              ? '请求超时，请先到 GitHub Actions 确认任务是否已提交。'
+              : error.message;
+            label.textContent = originalLabel;
+          } finally {
+            clearTimeout(timeout);
+            button.removeAttribute('aria-busy');
+            triggering = false;
+            if (submitted) {
+              cooldowns.add(button);
+              setTimeout(() => {
+                cooldowns.delete(button);
+                label.textContent = originalLabel;
+                updateTriggerButtons();
+              }, 10000);
+            }
+            updateTriggerButtons();
+          }
+        });
+      });
       document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', async () => {
         try {
           await navigator.clipboard.writeText(button.dataset.copy);
@@ -376,7 +510,7 @@ function schedulesResponse(schedules, now = Date.now()) {
       "vary": "Accept",
       "referrer-policy": "no-referrer",
       "x-content-type-options": "nosniff",
-      "content-security-policy": `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+      "content-security-policy": `default-src 'none'; connect-src 'self'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
     },
   });
 }
