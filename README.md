@@ -49,17 +49,17 @@
 
 脚本通过 Cloudflare API 读取指定 Worker 的 `RENEW_KV` 绑定，自动获取 namespace ID，再直接写入 KV；不需要配置 Worker 地址、GitHub 侧的 Worker 认证密钥或额外的 KV ID。原来只用于更新 Cron 的 API Token 如果仅有 `Workers Scripts: Edit`，请补充同一账号下的 `Workers KV Storage: Edit` 权限；原有脚本权限可以保留。[Worker 绑定查询接口](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/get/)、[KV 写入接口与权限](https://developers.cloudflare.com/api/resources/kv/subresources/namespaces/subresources/values/methods/update/)
 
-脚本优先读取 Dashboard、服务器详情页或续期提交后的页面提示，例如：
+脚本进入服务器详情页，读取 **Service information → Expiry** 的日期作为续期计划日期，例如：
 
 ```text
-You can't renew your server yet. You will be able to as of 07 November (in 3 day(s)).
+Expiry: 2026-11-16
 ```
 
-若当前为 2026 年 11 月 4 日，将该账号的可续期日期保存为 `2026-11-07`，第一次触发安排在 **2026-11-07 08:12（北京时间）**，即页面提示的可续期日期当天。另一个账号若提示 11 月 12 日，则安排在 11 月 12 日。日期解析支持英文月份、ISO 日期和跨月、跨年，服务器详情页的 `Expiry` 不用于调度。
+若当前为 2026 年 11 月 12 日，将该账号的计划日期保存为 `2026-11-16`，下一次触发安排在 **2026-11-16 08:12（北京时间）**，即 `Expiry` 当天。另一个账号若显示 11 月 15 日，则安排在 11 月 15 日。日期必须是有效的 `YYYY-MM-DD`，支持跨月、跨年和闰日。`as of …` 提示只用于判断续期结果，不再作为日期来源。
 
-如果本次运行结束时，可续期日期当天的 08:12 已过去，脚本会将 KV 计划更新为次日 08:12 再试。续期成功后会刷新页面尝试读取下一次日期；页面未给出日期、登录失败或流程异常时，保留尚未到期的计划，否则安排次日重试，以便重新获取日期。KV 同步失败会令该次 Actions 运行失败，其他账号仍继续执行；已有的到期 KV 记录会留待下一天重试。
+如果本次运行结束时，`Expiry` 当天的 08:12 已过去，脚本会将 KV 计划更新为次日 08:12 再试。续期成功后会刷新详情页，重新读取续期后的新 `Expiry`，不会沿用续期前的旧日期；读取时最多尝试三次，间隔两秒。页面未给出有效 `Expiry`、登录失败或流程异常时，保留尚未到期的计划，否则安排次日重试，以便重新获取日期。KV 同步失败会令该次 Actions 运行失败，其他账号仍继续执行；已有的到期 KV 记录会留待下一天重试。
 
-从旧版的提前一天策略升级后，请手动运行一次工作流，按页面提示刷新现有 KV 计划，使已有账号也使用当天触发时间。
+从旧版策略升级后，可手动运行一次工作流，按页面 `Expiry` 刷新现有 KV 计划；未手动运行的账号会在下一次正常运行后更新。
 
 KV 为每个邮箱保存独立的 `schedule:<邮箱去空格并转小写后的 SHA-256>` 记录，只包含账号哈希、可续期日期、下一次触发时间和更新时间，密码仍保存在 GitHub Secrets 中。Worker 每天只派发已到期的账号，通过 `client_payload.account_ids` 让 Actions 筛选对应账号。同一天的派发记录使用独立的 `dispatch:` 键，GitHub 拒绝派发时不会写入该记录；Actions 尚未更新日期时，下一天仍会重试。
 

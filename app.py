@@ -23,12 +23,6 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""      # tg通知bot token(可
 BASE_URL = "https://dashboard.katabump.com"  # 网站链接
 BEIJING_TZ = timezone(timedelta(hours=8))
 
-_MONTHS = {
-    "january": 1, "february": 2, "march": 3, "april": 4,
-    "may": 5, "june": 6, "july": 7, "august": 8,
-    "september": 9, "october": 10, "november": 11, "december": 12,
-}
-
 def load_accounts():
     accounts = _load_configured_accounts()
     account_ids = [_account_id(account["email"]) for account in accounts]
@@ -463,65 +457,13 @@ def login(sb, email: str, password: str) -> bool:
 # ===== 自动续期流程 =====
 
 def _read_alert(sb):
-    """优先读取带续期日期的 Bootstrap alert，找不到返回空串。"""
+    """读取 Bootstrap alert 以判断续期结果，找不到返回空串。"""
     try:
         sb.find_element("div.alert", timeout=4)
         texts = [(el.text or "").strip() for el in sb.find_elements("div.alert")]
         return next((text for text in texts if "as of" in text.lower()), next(iter(texts), ""))
     except Exception:
         return ""
-
-
-def _next_renewal_date_from_alert(alert_text, now=None):
-    """从页面的 “as of 27 August” 提示中提取下次可续期日期。"""
-    text = alert_text or ""
-    iso_match = re.search(r"\bas of\s+(20\d{2}-\d{2}-\d{2})\b", text, re.I)
-    if iso_match:
-        try:
-            return datetime.strptime(iso_match.group(1), "%Y-%m-%d").date().isoformat()
-        except ValueError:
-            return None
-
-    date_match = re.search(
-        r"\bas of\s+(\d{1,2})\s+([A-Za-z]+)(?:\s+(20\d{2}))?\b", text, re.I
-    )
-    if not date_match:
-        return None
-
-    day = int(date_match.group(1))
-    month = _MONTHS.get(date_match.group(2).lower())
-    if not month:
-        return None
-
-    now_bj = (now or datetime.now(timezone.utc)).astimezone(BEIJING_TZ)
-    if date_match.group(3):
-        try:
-            return datetime(int(date_match.group(3)), month, day).date().isoformat()
-        except ValueError:
-            return None
-
-    # 页面未给年份时，利用 in N day(s) 辅助判断跨年；不用系统的英文 locale。
-    days_match = re.search(r"\bin\s+(\d{1,5})\s+day", text, re.I)
-    expected = now_bj.date() + timedelta(days=int(days_match.group(1))) if days_match else now_bj.date()
-    candidates = []
-    for year in range(expected.year - 1, expected.year + 3):
-        try:
-            candidate = datetime(year, month, day).date()
-        except ValueError:
-            continue
-        if days_match or candidate >= now_bj.date() - timedelta(days=1):
-            candidates.append(candidate)
-    if not candidates:
-        return None
-    return min(candidates, key=lambda candidate: abs((candidate - expected).days)).isoformat()
-
-
-def _remember_renewal_date(alert_text, schedule_state):
-    renewal_date = _next_renewal_date_from_alert(alert_text)
-    if renewal_date:
-        schedule_state["renewal_date"] = renewal_date
-        print(f"页面可续期日期(标准): {renewal_date}")
-    return renewal_date
 
 
 def _report_account_schedule(account_email, renewal_date):
@@ -630,16 +572,36 @@ def _build_account_schedule(account_email, renewal_date, now=None):
 
 
 def _get_server_expiry_date(sb):
-    """读取详情页的 Expiry 供日志参考；调度使用 alert 中的可续期日期。"""
+    """读取详情页的 Expiry，验证后作为账号的续期计划日期。"""
     try:
         expiry_date = sb.execute_script(_SERVER_EXPIRY_JS)
     except Exception as e:
-        print(f"⚠️ 读取页面 Expiry 失败: {e}")
+        print(f"⚠️ 读取页面 Expiry 失败: {type(e).__name__}")
         return None
-    if expiry_date:
-        print(f"服务器到期日期(仅供参考): {expiry_date}")
-        return expiry_date
+    if isinstance(expiry_date, str):
+        expiry_date = expiry_date.strip()
+        if re.fullmatch(r"20\d{2}-\d{2}-\d{2}", expiry_date):
+            try:
+                expiry_date = datetime.strptime(expiry_date, "%Y-%m-%d").date().isoformat()
+            except ValueError:
+                pass
+            else:
+                print(f"页面 Expiry（续期计划日期）: {expiry_date}")
+                return expiry_date
     print("⚠️ 未能从服务器详情页读取 Expiry 日期")
+    return None
+
+
+def _capture_expiry_date(sb, schedule_state):
+    """给页面内容少量加载时间，只使用 Expiry，不从提示文字推算日期。"""
+    for attempt in range(3):
+        expiry_date = _get_server_expiry_date(sb)
+        if expiry_date:
+            schedule_state["renewal_date"] = expiry_date
+            return expiry_date
+        if attempt < 2:
+            time.sleep(2)
+    print("⚠️ 未采集到有效 Expiry，将使用保留计划或次日重试规则")
     return None
 
 
@@ -648,15 +610,11 @@ def _goto_server_detail(sb, account_email: str, schedule_state) -> bool | None:
     print("\n🖥️  正在进入服务器续期页...")
     time.sleep(5)
 
-    # 检查页面顶部是否已有"还无法续期"全局提示
-    alert_text = _read_alert(sb)
-    renewal_date = _remember_renewal_date(alert_text, schedule_state)
-    if renewal_date or "can't renew" in alert_text.lower() or "can’t renew" in alert_text.lower():
-        print(f"ℹ️  页面顶部提示: {alert_text}")
-        if not renewal_date:
-            print("⚠️ 未能从页面提示提取下次续期日期")
-        send_tg_message("ℹ️", "⚠️ 未到续期时间", alert_text, account_email=account_email)
-        return None
+    # 即使 Dashboard 提示尚不能续期，也进入详情页读取 Expiry。
+    dashboard_alert = _read_alert(sb)
+    dashboard_not_due = "can't renew" in dashboard_alert.lower() or "can’t renew" in dashboard_alert.lower()
+    if dashboard_not_due:
+        print(f"ℹ️  页面顶部提示: {dashboard_alert}")
 
     # 多种选择器尝试查找 See 链接
     selectors = [
@@ -688,6 +646,9 @@ def _goto_server_detail(sb, account_email: str, schedule_state) -> bool | None:
             pass
 
     if see_link is None:
+        if dashboard_not_due:
+            send_tg_message("ℹ️", "⚠️ 未到续期时间", dashboard_alert, account_email=account_email)
+            return None
         # 打印调试信息帮助排查
         cur_url = sb.get_current_url()
         title = sb.get_title() or ""
@@ -711,11 +672,10 @@ def _goto_server_detail(sb, account_email: str, schedule_state) -> bool | None:
     see_link.click()
     time.sleep(5)
     print(f"📄 当前页面: {sb.get_current_url()}")
-    _get_server_expiry_date(sb)
+    _capture_expiry_date(sb, schedule_state)
     alert_text = _read_alert(sb)
-    renewal_date = _remember_renewal_date(alert_text, schedule_state)
-    if renewal_date or "can't renew" in alert_text.lower() or "can’t renew" in alert_text.lower():
-        send_tg_message("ℹ️", "⚠️ 未到续期时间", alert_text, account_email=account_email)
+    if dashboard_not_due or "can't renew" in alert_text.lower() or "can’t renew" in alert_text.lower():
+        send_tg_message("ℹ️", "⚠️ 未到续期时间", alert_text or dashboard_alert, account_email=account_email)
         return None
     return True
 
@@ -884,6 +844,8 @@ def _submit_renew(sb, screenshot_path="renew_result.png"):
 def _check_renew_result(sb, screenshot_path, account_email, schedule_state):
     """读取页面 alert 提示，判断续期结果并推送 TG 通知"""
     print("\n📋 检查续期结果...")
+    # 已提交续期操作，之前读取的 Expiry 可能已变化，不能沿用旧值。
+    schedule_state["renewal_date"] = None
     alert_text = _read_alert(sb)
     if not alert_text:
         time.sleep(3)
@@ -892,22 +854,23 @@ def _check_renew_result(sb, screenshot_path, account_email, schedule_state):
     if alert_text:
         print(f"📩 页面提示: {alert_text}")
         low = alert_text.lower()
-        renewal_date = _remember_renewal_date(alert_text, schedule_state)
-        if renewal_date or "can't renew" in low or "can’t renew" in low or "unable" in low:
-            if not renewal_date:
-                print("⚠️ 未能从页面提示提取下次续期日期")
+        if "can't renew" in low or "can’t renew" in low or "unable" in low:
+            _capture_expiry_date(sb, schedule_state)
             send_tg_message("⏳", "未到续期时间", alert_text, screenshot_path, account_email)
         elif any(kw in low for kw in ( "renewed", "success", "extended")):
             send_tg_message("✅", "续期成功", alert_text, screenshot_path, account_email)
-            # 成功提示可能没有下次日期；刷新后再尝试读取页面的可续期提示。
+            # 成功后刷新详情页，采集续期后的新 Expiry。
             try:
                 sb.refresh_page()
-                _remember_renewal_date(_read_alert(sb), schedule_state)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"⚠️ 续期后刷新详情页失败，未沿用旧 Expiry: {type(e).__name__}")
+            else:
+                _capture_expiry_date(sb, schedule_state)
         else:
+            _capture_expiry_date(sb, schedule_state)
             send_tg_message("ℹ️", "续期操作已执行", alert_text, screenshot_path, account_email)
     else:
+        _capture_expiry_date(sb, schedule_state)
         print("ℹ️ 未检测到明确的提示框，可能续期操作未生效")
         send_tg_message("ℹ️", "续期操作已执行", "未检测到明确提示", screenshot_path, account_email)
 

@@ -21,26 +21,27 @@ with patch.dict(sys.modules, {"requests": requests_stub, "seleniumbase": seleniu
     spec.loader.exec_module(app)
 
 
-class DateParsingTests(unittest.TestCase):
-    def parse(self, text, now="2026-11-04T04:00:00+00:00"):
-        return app._next_renewal_date_from_alert(text, datetime.fromisoformat(now))
+class ExpiryDateTests(unittest.TestCase):
+    def read(self, value):
+        browser = MagicMock()
+        browser.execute_script.return_value = value
+        return app._get_server_expiry_date(browser)
 
-    def test_user_example(self):
-        self.assertEqual(self.parse(
-            "You can't renew your server yet. You will be able to as of 07 November (in 3 day(s))."
-        ), "2026-11-07")
+    def test_iso_expiry_dates_including_year_rollover_and_leap_day(self):
+        for value in ["2026-11-16", "2026-12-31", "2027-01-01", "2028-02-29"]:
+            with self.subTest(value=value):
+                self.assertEqual(self.read(value), value)
+        self.assertEqual(self.read(" 2026-11-16 "), "2026-11-16")
 
-    def test_year_rollover_and_explicit_year(self):
-        self.assertEqual(self.parse("as of 01 January (in 3 day(s))", "2026-12-29T20:00:00+00:00"), "2027-01-01")
-        self.assertEqual(self.parse("as of 01 January", "2026-12-30T00:00:00+00:00"), "2027-01-01")
-        self.assertEqual(self.parse("as of 07 NOVEMBER 2027"), "2027-11-07")
-        self.assertEqual(self.parse("as of 2027-01-01"), "2027-01-01")
+    def test_missing_malformed_and_invalid_expiry_dates(self):
+        for value in [None, "", "2026-02-30", "2026-11-31", "2027-02-29", "2026-1-6", "as of 16 November", "Success", 20261116]:
+            with self.subTest(value=value):
+                self.assertIsNone(self.read(value))
 
-    def test_leap_day_and_invalid_dates(self):
-        self.assertEqual(self.parse("as of 29 February (in 2 day(s))", "2028-02-27T04:00:00+00:00"), "2028-02-29")
-        for text in ["as of 2026-02-30", "as of 31 November", "as of 29 February 2027", "as of 07 Unknown", "Success"]:
-            with self.subTest(text=text):
-                self.assertIsNone(self.parse(text))
+    def test_browser_read_failure_has_no_date(self):
+        browser = MagicMock()
+        browser.execute_script.side_effect = RuntimeError("browser unavailable")
+        self.assertIsNone(app._get_server_expiry_date(browser))
 
 
 class AccountTests(unittest.TestCase):
@@ -159,6 +160,19 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(self.put.call_count, 2)
         self.assertNotEqual(self.put.call_args_list[0].args[0], self.put.call_args_list[1].args[0])
 
+    @patch.object(app, "send_tg_message")
+    def test_successful_renewal_saves_new_expiry_and_schedules_that_day(self, send):
+        state = {"renewal_date": "2026-11-12"}
+        browser = MagicMock()
+        browser.execute_script.return_value = "2026-11-16"
+        with patch.object(app, "_read_alert", return_value="Your service has been renewed."):
+            app._check_renew_result(browser, None, "one@example.com", state)
+        self.assertTrue(app._report_account_schedule("one@example.com", state["renewal_date"]))
+        saved = json.loads(self.put.call_args.kwargs["data"])
+        self.assertEqual(saved["renewal_date"], "2026-11-16")
+        self.assertEqual(saved["next_trigger_at"], "2026-11-16T00:12:00.000Z")
+        self.get.assert_called_once()
+
     def test_missing_or_wrong_binding_is_not_written(self):
         for binding in [[], [{"name": "RENEW_KV", "type": "plain_text", "text": "not a namespace"}]]:
             with self.subTest(binding=binding):
@@ -222,30 +236,102 @@ class ReportTests(unittest.TestCase):
 class FlowTests(unittest.TestCase):
     @patch.object(app, "send_tg_message")
     @patch.object(app.time, "sleep")
-    def test_dashboard_prompt_captured_without_attempting_renewal(self, sleep, send):
+    def test_dashboard_not_due_prompt_still_visits_detail_to_read_expiry(self, sleep, send):
         state = {"renewal_date": None}
-        with patch.object(app, "_read_alert", return_value="as of 07 November 2026"):
-            browser = MagicMock()
+        browser = MagicMock()
+        browser.execute_script.return_value = "2026-11-16"
+        prompt = "You can't renew your server yet. You will be able to as of 15 November."
+        with patch.object(app, "_read_alert", side_effect=[prompt, ""]):
             self.assertIsNone(app._goto_server_detail(browser, "one@example.com", state))
-        self.assertEqual(state["renewal_date"], "2026-11-07")
-        browser.find_element.assert_not_called()
+        browser.find_element.return_value.click.assert_called_once()
+        self.assertEqual(state["renewal_date"], "2026-11-16")
 
     @patch.object(app, "send_tg_message")
     @patch.object(app.time, "sleep")
-    def test_detail_page_prompt_has_priority_over_expiry(self, sleep, send):
-        state = {"renewal_date": None}
-        with patch.object(app, "_read_alert", side_effect=["", "as of 07 November 2026"]), patch.object(app, "_get_server_expiry_date", return_value="2026-12-01"):
-            self.assertIsNone(app._goto_server_detail(MagicMock(), "one@example.com", state))
-        self.assertEqual(state["renewal_date"], "2026-11-07")
-
-    @patch.object(app, "send_tg_message")
-    def test_success_refreshes_and_captures_next_date(self, send):
+    def test_detail_page_expiry_is_used_instead_of_alert_date(self, sleep, send):
         state = {"renewal_date": None}
         browser = MagicMock()
-        with patch.object(app, "_read_alert", side_effect=["Successfully renewed", "as of 30 November 2026"]):
+        browser.execute_script.return_value = "2026-11-16"
+        prompt = "You can't renew your server yet. You will be able to as of 15 November."
+        with patch.object(app, "_read_alert", side_effect=["", prompt]):
+            self.assertIsNone(app._goto_server_detail(browser, "one@example.com", state))
+        self.assertEqual(state["renewal_date"], "2026-11-16")
+
+    @patch.object(app.time, "sleep")
+    def test_expiry_does_not_skip_a_renewal_without_a_not_due_prompt(self, sleep):
+        state = {"renewal_date": None}
+        browser = MagicMock()
+        browser.execute_script.return_value = "2026-11-16"
+        with patch.object(app, "_read_alert", return_value=""):
+            self.assertTrue(app._goto_server_detail(browser, "one@example.com", state))
+        self.assertEqual(state["renewal_date"], "2026-11-16")
+
+    @patch.object(app, "send_tg_message")
+    def test_success_refreshes_before_reading_new_expiry(self, send):
+        state = {"renewal_date": "2026-11-12"}
+        browser = MagicMock()
+
+        def read_expiry(script):
+            browser.refresh_page.assert_called_once()
+            return "2026-11-16"
+
+        browser.execute_script.side_effect = read_expiry
+        with patch.object(app, "_read_alert", return_value="Your service has been renewed."):
             app._check_renew_result(browser, None, "one@example.com", state)
-        browser.refresh_page.assert_called_once()
-        self.assertEqual(state["renewal_date"], "2026-11-30")
+        self.assertEqual(state["renewal_date"], "2026-11-16")
+
+    @patch.object(app, "send_tg_message")
+    @patch.object(app.time, "sleep")
+    def test_success_waits_for_expiry_to_appear(self, sleep, send):
+        state = {"renewal_date": "2026-11-12"}
+        browser = MagicMock()
+        browser.execute_script.side_effect = [None, None, "2026-11-16"]
+        with patch.object(app, "_read_alert", return_value="Your service has been renewed."):
+            app._check_renew_result(browser, None, "one@example.com", state)
+        self.assertEqual(state["renewal_date"], "2026-11-16")
+        self.assertEqual(sleep.call_args_list, [unittest.mock.call(2), unittest.mock.call(2)])
+
+    @patch.object(app, "send_tg_message")
+    @patch.object(app.time, "sleep")
+    def test_success_without_expiry_discards_pre_renewal_date(self, sleep, send):
+        state = {"renewal_date": "2026-11-12"}
+        browser = MagicMock()
+        browser.execute_script.return_value = None
+        with patch.object(app, "_read_alert", return_value="Your service has been renewed."):
+            app._check_renew_result(browser, None, "one@example.com", state)
+        self.assertIsNone(state["renewal_date"])
+
+    @patch.object(app, "send_tg_message")
+    def test_failed_refresh_does_not_reuse_old_expiry(self, send):
+        state = {"renewal_date": "2026-11-12"}
+        browser = MagicMock()
+        browser.refresh_page.side_effect = RuntimeError("refresh failed")
+        browser.execute_script.return_value = "2026-11-12"
+        with patch.object(app, "_read_alert", return_value="Your service has been renewed."):
+            app._check_renew_result(browser, None, "one@example.com", state)
+        self.assertIsNone(state["renewal_date"])
+        browser.execute_script.assert_not_called()
+
+    @patch.object(app, "send_tg_message")
+    @patch.object(app.time, "sleep")
+    def test_alert_date_is_not_used_when_expiry_is_missing(self, sleep, send):
+        state = {"renewal_date": None}
+        browser = MagicMock()
+        browser.execute_script.return_value = None
+        prompt = "You can't renew your server yet. You will be able to as of 15 November."
+        with patch.object(app, "_read_alert", return_value=prompt):
+            app._check_renew_result(browser, None, "one@example.com", state)
+        self.assertIsNone(state["renewal_date"])
+
+    @patch.object(app, "send_tg_message")
+    @patch.object(app.time, "sleep")
+    def test_expiry_is_captured_without_result_alert(self, sleep, send):
+        state = {"renewal_date": "2026-11-12"}
+        browser = MagicMock()
+        browser.execute_script.return_value = "2026-11-16"
+        with patch.object(app, "_read_alert", return_value=""):
+            app._check_renew_result(browser, None, "one@example.com", state)
+        self.assertEqual(state["renewal_date"], "2026-11-16")
 
     def test_main_reports_each_account_even_if_first_login_fails(self):
         accounts = [{"email": "one@example.com", "password": "first"}, {"email": "two@example.com", "password": "second"}]
